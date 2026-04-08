@@ -175,6 +175,7 @@ def make_loop_modelwrapper(
                 "ActVal": 0,
                 "binaryXnorMode": 0,
                 "noActivation": 1,
+                "mem_mode": "external_mem",
             },
         ),
         create_node(
@@ -208,6 +209,7 @@ def make_loop_modelwrapper(
                 "ActVal": 0,
                 "binaryXnorMode": 0,
                 "noActivation": 1,
+                "mem_mode": "external_mem",
             },
         ),
         create_node(
@@ -241,6 +243,7 @@ def make_loop_modelwrapper(
                 "ActVal": 0,
                 "binaryXnorMode": 0,
                 "noActivation": 1,
+                "mem_mode": "external_mem",
             },
         ),
         create_node(
