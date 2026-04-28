@@ -475,6 +475,9 @@ def step_convert_to_hw(model: ModelWrapper, cfg: DataflowBuildConfig):
 
     # Classification/output layers
     model = apply_if_relevant(model, ["TopK"], to_hw.InferLabelSelectLayer(), "label select layers")
+    model = apply_if_relevant(
+        model, ["Concat"], to_hw.InferAddCLSTokenLayer(), "CLS token insertion layers"
+    )
 
     # Input quantization (if any) - high-bitwidth MultiThreshold and Quant as Requant,
     # low-bitwidth MultiThreshold as Thresholding
