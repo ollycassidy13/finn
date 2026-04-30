@@ -147,6 +147,10 @@ class AddCLSToken_rtl(AddCLSToken, RTLBackend):
         self.set_nodeattr("rtlsim_so", sim.lib._name)
         return sim
 
+    def get_rtlsim_input_indices(self):
+        """Only patch tokens are streamed; CLS token data is embedded in generated RTL."""
+        return [0]
+
     def code_generation_ipi(self):
         code_gen_dir = self.get_nodeattr("code_gen_dir_ipgen")
         sourcefiles = [

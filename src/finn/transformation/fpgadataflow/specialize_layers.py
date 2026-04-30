@@ -403,7 +403,6 @@ class SpecializeLayers(Transformation):
                 node.input,
                 node.output,
                 domain="finn.custom_op.fpgadataflow." + impl_style,
-                name=node.name,
             )
             # add all attributes
             for attribute in node.attribute:
