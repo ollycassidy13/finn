@@ -296,6 +296,23 @@ def prepare_loop_ops_fifo_sizing(node, cfg):
     loop_nodes = loop_model.get_nodes_by_op_type("FINNLoop")
     for loop_node in loop_nodes:
         prepare_loop_ops_fifo_sizing(loop_node, cfg)
+    if os.environ.get("FINN_MLO_FIXED_FIFOS") == "1":
+        print(f"Using fixed FIFO insertion for MLO loop body {node.name}")
+        loop_model = loop_model.transform(InsertDWC())
+        loop_model = loop_model.transform(
+            InsertFIFO(
+                create_shallow_fifos=True,
+                max_qsrl_depth=256,
+                vivado_ram_style=cfg.large_fifo_mem_style,
+            )
+        )
+        loop_model = loop_model.transform(SpecializeLayers(cfg._resolve_fpga_part()))
+        loop_model = loop_model.transform(SplitLargeFIFOs())
+        loop_model = loop_model.transform(RemoveShallowFIFOs())
+        loop_model = loop_model.transform(GiveUniqueNodeNames(prefix=node.name + "_"))
+        loop_model = loop_model.transform(GiveReadableTensorNames())
+        node_inst.set_nodeattr("body", loop_model.graph)
+        return
     loop_model = loop_model.transform(
         PrepareIP(cfg._resolve_fpga_part(), cfg._resolve_hls_clk_period())
     )
@@ -1105,9 +1122,10 @@ def step_create_stitched_ip(model: ModelWrapper, cfg: DataflowBuildConfig):
             verify_model = verify_model.transform(AnnotateCycles())
             estimate_network_performance = verify_model.analysis(dataflow_performance)
             prev_liveness = get_liveness_threshold_cycles()
-            os.environ["LIVENESS_THRESHOLD"] = str(
-                int(estimate_network_performance["critical_path_cycles"] * 1.1 + 50)
+            estimated_liveness = int(
+                estimate_network_performance["critical_path_cycles"] * 1.1 + 50
             )
+            os.environ["LIVENESS_THRESHOLD"] = str(max(prev_liveness, estimated_liveness))
             if cfg.verify_save_rtlsim_waveforms:
                 verify_out_dir = cfg.output_dir + "/verification_output"
                 waveform_dir = verify_out_dir + "/stitched_ip_rtlsim_waveforms"

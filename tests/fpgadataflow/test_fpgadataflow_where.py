@@ -242,9 +242,7 @@ def test_convert_onnx_where_broadcast_to_where():
     model = _make_onnx_where_model(
         cond_shape=cond_shape, x_shape=x_shape, y_shape=y_shape, out_shape=out_shape
     )
-    cond, xval, yval = _make_inputs(
-        cond_shape=cond_shape, x_shape=x_shape, y_shape=y_shape
-    )
+    cond, xval, yval = _make_inputs(cond_shape=cond_shape, x_shape=x_shape, y_shape=y_shape)
     expected = np.where(cond.astype(bool), xval, yval)
 
     ret = execute_onnx(model, {"cond": cond.astype(bool), "xval": xval, "yval": yval})
@@ -278,9 +276,7 @@ def test_convert_onnx_where_scalar_broadcast_to_where():
     model = _make_onnx_where_model(
         cond_shape=cond_shape, x_shape=x_shape, y_shape=y_shape, out_shape=out_shape
     )
-    cond, xval, yval = _make_inputs(
-        cond_shape=cond_shape, x_shape=x_shape, y_shape=y_shape
-    )
+    cond, xval, yval = _make_inputs(cond_shape=cond_shape, x_shape=x_shape, y_shape=y_shape)
     expected = np.where(cond.astype(bool), xval, yval)
 
     ret = execute_onnx(model, {"cond": cond.astype(bool), "xval": xval, "yval": yval})
@@ -354,9 +350,7 @@ def test_where_python_execution_broadcast():
         y_shape=y_shape,
         out_shape=out_shape,
     )
-    cond, xval, yval = _make_inputs(
-        cond_shape=cond_shape, x_shape=x_shape, y_shape=y_shape
-    )
+    cond, xval, yval = _make_inputs(cond_shape=cond_shape, x_shape=x_shape, y_shape=y_shape)
     expected = np.where(cond.astype(bool), xval, yval)
 
     ret = execute_onnx(model, {"cond": cond, "xval": xval, "yval": yval})
@@ -538,9 +532,7 @@ def test_where_rtlsim_broadcast():
         y_shape=y_shape,
         out_shape=out_shape,
     )
-    cond, xval, yval = _make_inputs(
-        cond_shape=cond_shape, x_shape=x_shape, y_shape=y_shape
-    )
+    cond, xval, yval = _make_inputs(cond_shape=cond_shape, x_shape=x_shape, y_shape=y_shape)
     expected = np.where(cond.astype(bool), xval, yval)
 
     model = model.transform(SpecializeLayers(FPGA_PART))
@@ -591,9 +583,7 @@ def test_where_stitched_ip_rtlsim_broadcast():
         y_shape=y_shape,
         out_shape=out_shape,
     )
-    cond, xval, yval = _make_inputs(
-        cond_shape=cond_shape, x_shape=x_shape, y_shape=y_shape
-    )
+    cond, xval, yval = _make_inputs(cond_shape=cond_shape, x_shape=x_shape, y_shape=y_shape)
     expected = np.where(cond.astype(bool), xval, yval)
 
     model.set_metadata_prop("exec_mode", "rtlsim")

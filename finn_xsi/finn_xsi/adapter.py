@@ -110,6 +110,10 @@ def compile_sim_obj(top_module_name, source_list, sim_out_dir, debug=False, beha
     if behav:
         cmd_xelab.append("-define")
         cmd_xelab.append("FINN_SIMULATION")
+    xelab_mt = os.environ.get("FINN_XELAB_MT")
+    if xelab_mt:
+        cmd_xelab.append("--mt")
+        cmd_xelab.append(xelab_mt)
     for lib in xelab_libs:
         cmd_xelab.append("-L")
         cmd_xelab.append(lib)

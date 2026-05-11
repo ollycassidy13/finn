@@ -51,6 +51,12 @@ output   out0_V_TVALID,
 output  $OUT_RANGE$ out0_V_TDATA
 );
 
+localparam integer FIFO_DATA_WIDTH = $WIDTH$;
+localparam integer FIFO_DEPTH = $DEPTH$;
+localparam integer FIFO_SPLIT_WIDTH = 512;
+localparam integer FIFO_SPLIT_COUNT =
+	(FIFO_DATA_WIDTH + FIFO_SPLIT_WIDTH - 1) / FIFO_SPLIT_WIDTH;
+
 `ifdef FINN_SIMULATION
 	fifo_gauge #(.WIDTH($WIDTH$), .COUNT_WIDTH($COUNT_WIDTH$)) fifo (
 		.clk(ap_clk), .rst(!ap_rst_n),
@@ -59,12 +65,40 @@ output  $OUT_RANGE$ out0_V_TDATA
 		.count(count), .maxcount(maxcount)
 	);
 `else
-	Q_srl #(.depth($DEPTH$), .width($WIDTH$)) fifo (
-		.clock(ap_clk), .reset(!ap_rst_n),
-		.i_d(in0_V_TDATA), .i_v(in0_V_TVALID), .i_r(in0_V_TREADY),
-		.o_d(out0_V_TDATA), .o_v(out0_V_TVALID), .o_r(out0_V_TREADY),
-		.count(count), .maxcount(maxcount)
-	);
+	generate
+		if((FIFO_DATA_WIDTH > FIFO_SPLIT_WIDTH) && (FIFO_DEPTH <= 256)) begin : g_wide_fifo
+			genvar chunk;
+			for(chunk = 0; chunk < FIFO_SPLIT_COUNT; chunk = chunk + 1) begin : g_chunk
+				localparam integer LO = chunk * FIFO_SPLIT_WIDTH;
+				localparam integer REM = FIFO_DATA_WIDTH - LO;
+				localparam integer CW = (REM > FIFO_SPLIT_WIDTH) ? FIFO_SPLIT_WIDTH : REM;
+				if(chunk == 0) begin : g_first
+					Q_srl #(.depth(FIFO_DEPTH), .width(CW)) fifo (
+						.clock(ap_clk), .reset(!ap_rst_n),
+						.i_d(in0_V_TDATA[LO +: CW]), .i_v(in0_V_TVALID), .i_r(in0_V_TREADY),
+						.o_d(out0_V_TDATA[LO +: CW]), .o_v(out0_V_TVALID), .o_r(out0_V_TREADY),
+						.count(count), .maxcount(maxcount)
+					);
+				end
+				else begin : g_rest
+					Q_srl #(.depth(FIFO_DEPTH), .width(CW)) fifo (
+						.clock(ap_clk), .reset(!ap_rst_n),
+						.i_d(in0_V_TDATA[LO +: CW]), .i_v(in0_V_TVALID), .i_r(),
+						.o_d(out0_V_TDATA[LO +: CW]), .o_v(), .o_r(out0_V_TREADY),
+						.count(), .maxcount()
+					);
+				end
+			end
+		end
+		else begin : g_narrow_fifo
+			Q_srl #(.depth(FIFO_DEPTH), .width(FIFO_DATA_WIDTH)) fifo (
+				.clock(ap_clk), .reset(!ap_rst_n),
+				.i_d(in0_V_TDATA), .i_v(in0_V_TVALID), .i_r(in0_V_TREADY),
+				.o_d(out0_V_TDATA), .o_v(out0_V_TVALID), .o_r(out0_V_TREADY),
+				.count(count), .maxcount(maxcount)
+			);
+		end
+	endgenerate
 `endif
 
 endmodule

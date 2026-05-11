@@ -184,8 +184,11 @@ logic axis_dwc_tready;
 logic[DS_BITS_BA-1:0] axis_dwc_tdata;
 logic[(DS_BITS_BA)/8-1:0] axis_dwc_tkeep;
 logic axis_dwc_tlast;
+localparam int unsigned DWC_KEEP_BYTES = ((DS_BITS_BA/8) > (DATA_BITS/8)) ? (DS_BITS_BA/8) : (DATA_BITS/8);
+localparam int unsigned DWC_FIFO_DEPTH = ((2*DWC_KEEP_BYTES) > 4096) ? (2*DWC_KEEP_BYTES) : 4096;
 
 axis_fifo_adapter #(
+    .DEPTH(DWC_FIFO_DEPTH),
     .S_DATA_WIDTH(DATA_BITS), .M_DATA_WIDTH(DS_BITS_BA)
 ) inst_dwc (
     .clk(aclk), .rst(~aresetn),

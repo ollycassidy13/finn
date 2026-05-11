@@ -31,12 +31,16 @@
 *.py[cod]
 *.so
 *.cfg
+xelab.pb
+xsim.dir/
+xvlog.pb
 !.isort.cfg
 !setup.cfg
 *.orig
 *.log
 *.pot
 __pycache__/*
+**/__pycache__/
 .cache/*
 .*.swp
 *.ipynb_checkpoints*
@@ -67,7 +71,11 @@ coverage.xml
 # Build and docs folder/files
 build/*
 scripts_finn/*
+vivado-env-setup.sh
 tinydeit/build/*
+bert/build/*
+bert/cache/*
+bert/data/*
 dist/*
 sdist/*
 docs/api/*
