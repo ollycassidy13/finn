@@ -222,7 +222,7 @@ def test_convert_onnx_where_to_where():
 
     inst = getCustomOp(node)
     assert inst.get_normal_output_shape() == (1, 2, 4)
-    assert inst.get_exp_cycles() == 8
+    assert inst.get_exp_cycles() == 20
 
     ret = execute_onnx(model, {"cond": cond, "xval": xval, "yval": yval})
     assert (ret["out"] == expected).all()
@@ -394,6 +394,7 @@ def test_where_rtl_codegen(tmp_path, finn_dtype, fold_width):
     assert ".DATA_WIDTH(%d)" % finn_dtype.bitwidth() in core_wrapper_text
     assert ".PE(2)" in core_wrapper_text
     assert ".NDIMS(3)" in core_wrapper_text
+    assert '.RAM_STYLE("auto")' in core_wrapper_text
     assert "in2_V_TDATA" in wrapper_text
     assert "out0_V_TVALID" in wrapper_text
 
