@@ -64,10 +64,41 @@ chains that could not fit inside a clock region or SLR DSP column.
 - Run the DCP flow with `--weight-state bert/build/trained --strict-weights`
   once the GPU-trained checkpoint exists. Use a checkpoint whose hidden size,
   FFN size, and layer count match the selected preset.
-- Fix or relax the max-util target: add physical partitioning around the loop
-  body, reduce cross-SLR stream width/fanout, break long DSP cascade chains,
-  or reduce PE/SIMD until the full-size design places.
-- Find a tractable full-graph verification strategy for max-util, such as a
-  faster simulator, a staged loop-body verification, or a smaller repeated
-  proof target plus board-level validation.
 - Wire the generated DCP into the final V80 shell and host policy service.
+
+## Max-Util Implementation Plan
+
+The current max-util failure is driven by automatic target-FPS folding. The
+failing reports show loop-body MVAUs folded to SIMD 768 and SIMD 3072, which
+creates long DSP cascade chains and heavy SLR crossings.
+
+Next implementation experiments:
+
+- Run `max-util` with `--no-target-fps` to preserve generated PE/SIMD values.
+- Sweep `--target-fps 250/500/1000` with `--mvau-wwidth-max 128/256/512`.
+- Keep `--fixed-mlo-fifos --no-verify` for placement/timing exploration only.
+- Promote only builds that later pass stitched-IP RTLSIM.
+- If capped folding still fails, add SLR-aware floorplanning around the loop
+  body and reduce cross-SLR stream widths.
+
+## Verification Plan
+
+Use a ladder rather than full max-util XSIM first:
+
+- `bert.verify_build` checks RTLSIM success, DCP presence, and OOC timing.
+- `smoke` remains the fast end-to-end RTLSIM/DCP regression.
+- `v80` remains the practical verified V80 DCP regression.
+- Full-size builds first prove DCP/timing with `--no-verify`.
+- A full-size build becomes a handoff artifact only after stitched-IP RTLSIM or
+  board-level validation compares against `expected_output.npy`.
+
+## Host Contract
+
+`host_runtime.py` defines the current service boundary:
+
+- Host produces one UINT8 activation tensor shaped `[1, seq_len - 1, hidden]`.
+- FPGA inserts CLS, runs the quantized safety core, selects CLS, and returns
+  logits shaped `[1, num_classes]`.
+- Host applies softmax, unsafe thresholding, logging, and policy actions.
+- Tokenization, embedding lookup, masks, and unsupported BERT pieces remain on
+  host until they have supported FINN operators and a verified hardware path.

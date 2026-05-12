@@ -30,6 +30,7 @@ from bert.common import (
     DEFAULT_BUILD_DIR,
     DEFAULT_FPGA_PART,
     CorePreset,
+    derive_preset,
     get_preset,
     repo_path,
     write_json,
@@ -619,6 +620,40 @@ def write_models(
     return base_path, specialized_path
 
 
+def add_preset_override_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--preset-name", default=None, help="Name for an overridden preset.")
+    parser.add_argument("--seq-len", type=int, default=None)
+    parser.add_argument("--hidden", type=int, default=None)
+    parser.add_argument("--intermediate", type=int, default=None)
+    parser.add_argument("--layers", type=int, default=None)
+    parser.add_argument("--num-classes", type=int, default=None)
+    parser.add_argument("--pe", type=int, default=None)
+    parser.add_argument("--simd", type=int, default=None)
+    parser.add_argument("--target-fps", type=int, default=None)
+    parser.add_argument("--mvau-wwidth-max", type=int, default=None)
+    parser.add_argument(
+        "--ram-style", choices=["auto", "block", "distributed", "ultra"], default=None
+    )
+
+
+def resolve_preset(args: argparse.Namespace) -> CorePreset:
+    base = get_preset(args.preset)
+    return derive_preset(
+        base,
+        name=args.preset_name or base.name,
+        seq_len=args.seq_len,
+        hidden=args.hidden,
+        intermediate=args.intermediate,
+        layers=args.layers,
+        num_classes=args.num_classes,
+        pe=args.pe,
+        simd=args.simd,
+        target_fps=args.target_fps,
+        mvau_wwidth_max=args.mvau_wwidth_max,
+        ram_style=args.ram_style,
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--preset", choices=sorted(CORE_PRESETS), default="smoke")
@@ -627,6 +662,7 @@ def main() -> None:
         default=str((DEFAULT_BUILD_DIR / "model").relative_to(repo_path("."))),
     )
     parser.add_argument("--fpga-part", default=DEFAULT_FPGA_PART)
+    add_preset_override_args(parser)
     parser.add_argument("--no-specialized", dest="save_specialized", action="store_false")
     parser.add_argument("--mlo", action="store_true")
     parser.add_argument(
@@ -647,7 +683,7 @@ def main() -> None:
 
     output_dir = repo_path(args.output_dir)
     base, specialized = write_models(
-        get_preset(args.preset),
+        resolve_preset(args),
         output_dir,
         args.fpga_part,
         args.save_specialized,

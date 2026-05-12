@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -107,6 +107,15 @@ def get_preset(name: str) -> CorePreset:
         raise ValueError(
             f"Unknown BERT safety core preset {name!r}; valid presets: {valid}"
         ) from exc
+
+
+def derive_preset(base: CorePreset, name: str | None = None, **overrides: Any) -> CorePreset:
+    """Return a preset with selected fields overridden for build sweeps."""
+
+    clean_overrides = {key: value for key, value in overrides.items() if value is not None}
+    if name is not None:
+        clean_overrides["name"] = name
+    return replace(base, **clean_overrides)
 
 
 def write_json(path: str | Path, payload: Any) -> None:

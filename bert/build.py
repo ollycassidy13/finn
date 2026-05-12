@@ -16,6 +16,8 @@ from bert.common import (
     DEFAULT_BUILD_DIR,
     DEFAULT_CLOCK_NS,
     DEFAULT_FPGA_PART,
+    CorePreset,
+    derive_preset,
     get_preset,
     repo_path,
     write_json,
@@ -59,8 +61,28 @@ def make_reference_io(base_model_path: Path, output_dir: Path, seed: int) -> Non
     np.savez(output_dir / "expected_context.npz", **context)
 
 
-def build_config(args: argparse.Namespace, output_dir: Path) -> DataflowBuildConfig:
-    preset = get_preset(args.preset)
+def resolve_preset(args: argparse.Namespace) -> CorePreset:
+    base = get_preset(args.preset)
+    name = args.preset_name or base.name
+    return derive_preset(
+        base,
+        name=name,
+        seq_len=args.seq_len,
+        hidden=args.hidden,
+        intermediate=args.intermediate,
+        layers=args.layers,
+        num_classes=args.num_classes,
+        pe=args.pe,
+        simd=args.simd,
+        target_fps=args.preset_target_fps,
+        mvau_wwidth_max=args.mvau_wwidth_max,
+        ram_style=args.ram_style,
+    )
+
+
+def build_config(
+    args: argparse.Namespace, output_dir: Path, preset: CorePreset
+) -> DataflowBuildConfig:
     if args.mode == "estimate":
         steps = BUILD_STEPS_ESTIMATE
         outputs = [DataflowOutputType.ESTIMATE_REPORTS]
@@ -81,12 +103,15 @@ def build_config(args: argparse.Namespace, output_dir: Path) -> DataflowBuildCon
         verify_steps = [VerificationStepType.STITCHED_IP_RTLSIM] if args.verify else []
         stitched_dcp = True
 
+    target_fps = None if args.no_target_fps else args.target_fps or preset.target_fps
+
     return DataflowBuildConfig(
         output_dir=str(output_dir),
         synth_clk_period_ns=args.clock_ns,
         board=args.board,
         fpga_part=args.fpga_part,
-        target_fps=args.target_fps or preset.target_fps,
+        target_fps=target_fps,
+        folding_config_file=args.folding_config_file,
         standalone_thresholds=True,
         infer_shuffle_skip_first=False,
         save_intermediate_models=True,
@@ -122,6 +147,37 @@ def main() -> None:
     parser.add_argument("--fpga-part", default=DEFAULT_FPGA_PART)
     parser.add_argument("--clock-ns", type=float, default=DEFAULT_CLOCK_NS)
     parser.add_argument("--target-fps", type=int, default=None)
+    parser.add_argument(
+        "--no-target-fps",
+        action="store_true",
+        help=(
+            "Skip FINN target-FPS folding. This preserves the generated PE/SIMD "
+            "attributes or values supplied by --folding-config-file."
+        ),
+    )
+    parser.add_argument(
+        "--folding-config-file",
+        default=None,
+        help="Optional FINN folding/config JSON applied after target-FPS folding.",
+    )
+    parser.add_argument("--preset-name", default=None, help="Name for an overridden preset.")
+    parser.add_argument("--seq-len", type=int, default=None)
+    parser.add_argument("--hidden", type=int, default=None)
+    parser.add_argument("--intermediate", type=int, default=None)
+    parser.add_argument("--layers", type=int, default=None)
+    parser.add_argument("--num-classes", type=int, default=None)
+    parser.add_argument("--pe", type=int, default=None)
+    parser.add_argument("--simd", type=int, default=None)
+    parser.add_argument(
+        "--preset-target-fps",
+        type=int,
+        default=None,
+        help="Override the preset default target FPS used when --target-fps is omitted.",
+    )
+    parser.add_argument("--mvau-wwidth-max", type=int, default=None)
+    parser.add_argument(
+        "--ram-style", choices=["auto", "block", "distributed", "ultra"], default=None
+    )
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--atol", type=float, default=0.0)
     parser.add_argument("--rtlsim-batch-size", type=int, default=1)
@@ -199,7 +255,8 @@ def main() -> None:
         os.environ["LIVENESS_THRESHOLD"] = str(args.liveness_threshold_cycles)
     if args.fixed_mlo_fifos:
         os.environ["FINN_MLO_FIXED_FIFOS"] = "1"
-    if args.verify and args.preset == "max-util" and args.mode in {"rtl", "dcp"}:
+    preset = resolve_preset(args)
+    if args.verify and preset.name == "max-util" and args.mode in {"rtl", "dcp"}:
         print(
             "Warning: max-util stitched-IP RTLSIM is a long XSIM run. "
             "Use --no-verify for DCP/timing exploration."
@@ -209,7 +266,7 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     model_dir = output_dir / "model"
     base_model, specialized_model = write_models(
-        get_preset(args.preset),
+        preset,
         model_dir,
         args.fpga_part,
         save_specialized=True,
@@ -222,9 +279,9 @@ def main() -> None:
     if not args.skip_reference_io:
         make_reference_io(base_model, output_dir, args.seed)
 
-    cfg = build_config(args, output_dir)
+    cfg = build_config(args, output_dir, preset)
     write_json(output_dir / "build_request.json", vars(args))
-    write_json(output_dir / "preset.json", get_preset(args.preset).as_dict())
+    write_json(output_dir / "preset.json", preset.as_dict())
     ret = build.build_dataflow_cfg(str(specialized_model), cfg)
     if ret != 0:
         raise SystemExit(ret)

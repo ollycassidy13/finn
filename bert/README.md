@@ -15,6 +15,10 @@ teacher and exports the trained checkpoint artifacts.
   the FINN core and quantizes them to INT8 initializers.
 - `build.py`: generates deterministic reference I/O and runs FINN estimate,
   stitched-IP RTLSIM, and DCP flows for V80.
+- `verify_build.py`: checks whether build directories have RTLSIM success,
+  generated DCPs, and passing OOC timing reports.
+- `host_runtime.py`: records the host-side activation/logit contract for the
+  MCP service wrapper.
 - `system.md`: records how this accelerator fits into the wider MCP safety
   system.
 
@@ -53,6 +57,12 @@ The full max-util RTLSIM is very slow under XSIM. Use it only when a long
 run is acceptable; use `--no-verify` and optionally `--fixed-mlo-fifos` for
 DCP/timing exploration, then rely on the smoke/V80 targets for routine
 stitched-IP RTLSIM regression checks.
+
+Check existing build artifacts with:
+
+```bash
+python -m bert.verify_build
+```
 
 ## Bring-Up Results
 
@@ -94,6 +104,25 @@ The next max-util implementation work is physical, not training-related:
 reduce or floorplan SLR crossings, break the long DSP cascade chains, or reduce
 PE/SIMD until the full-size design can place. The verified handoff targets for
 now are `v80_smoke_mlo_dcp_v1` and `v80_mlo_dcp_v1`.
+
+The failed max-util folding report showed loop-body MVAUs at SIMD 768 and SIMD
+3072 after target-FPS folding. That is the immediate cause of the DSP cascade
+placement warnings. Start the next implementation sweep by preserving the
+generated PE/SIMD values or capping automatic folding:
+
+```bash
+FINN_DOCKER_PREBUILT=1 FINN_SKIP_DEP_REPOS=1 ./run-docker.sh \
+  python -m bert.build \
+  --preset max-util --preset-name max-util-constrained \
+  --mode estimate --no-target-fps \
+  --output-dir bert/build/max_util_constrained_estimate
+
+FINN_DOCKER_PREBUILT=1 FINN_SKIP_DEP_REPOS=1 ./run-docker.sh \
+  python -m bert.build \
+  --preset max-util --mode dcp --target-fps 500 \
+  --mvau-wwidth-max 256 --fixed-mlo-fifos --no-verify \
+  --output-dir bert/build/max_util_t500_w256_dcp
+```
 
 ## GPU Training
 
