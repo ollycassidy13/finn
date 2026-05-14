@@ -34,6 +34,8 @@ from finn.custom_op.fpgadataflow.hlsbackend import HLSBackend
 from finn.custom_op.fpgadataflow.lookup import Lookup
 from finn.util.data_packing import numpy_to_hls_code, pack_innermost_dim_as_hex_string
 
+RAM_STYLES = {"auto": "AUTO", "block": "BRAM", "distributed": "LUTRAM", "ultra": "URAM"}
+
 
 class Lookup_hls(Lookup, HLSBackend):
     "Streaming elementwise HLS lookup, mapping indices to values."
@@ -152,7 +154,12 @@ class Lookup_hls(Lookup, HLSBackend):
         my_pragmas.append("#pragma HLS INTERFACE axis port=out0_V")
         my_pragmas.append("#pragma HLS INTERFACE ap_ctrl_none port=return")
         if mem_mode == "internal_embedded":
-            my_pragmas.append("#pragma HLS BIND_STORAGE variable=embeddings type=ROM_2P impl=BRAM")
+            ram_style = RAM_STYLES[self.get_nodeattr("ram_style")]
+            storage_type = "RAM_S2P" if ram_style == "URAM" else "ROM_2P"
+            my_pragmas.append(
+                "#pragma HLS BIND_STORAGE variable=embeddings "
+                "type=%s impl=%s" % (storage_type, ram_style)
+            )
         elif mem_mode == "external":
             my_pragmas.append("#pragma HLS INTERFACE m_axi offset=slave port=mem")
             my_pragmas.append("#pragma HLS INTERFACE s_axilite port=mem bundle=control")

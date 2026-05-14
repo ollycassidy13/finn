@@ -151,6 +151,40 @@ def test_fpgadataflow_lookup(edt, embedding_cfg, exec_mode):
 @pytest.mark.fpgadataflow
 @pytest.mark.vivado
 @pytest.mark.slow
+def test_fpgadataflow_lookup_uram_rtlsim():
+    fpga_part = "xcvc1902-vsva2197-2MP-e-S"
+    edt = DataType["INT8"]
+    num_embeddings = 4096
+    idt = DataType["UINT16"]
+    embedding_dim = 8
+    ishape = (1, 4)
+    eshape = (num_embeddings, embedding_dim)
+    embeddings = gen_finn_dt_tensor(edt, eshape)
+    model = make_lookup_model(embeddings, ishape, idt, edt)
+    iname = model.get_first_global_in()
+    oname = model.get_first_global_out()
+    itensor = np.asarray([[0, 1, num_embeddings - 2, num_embeddings - 1]], dtype=np.int64)
+    exp_out = np.take(embeddings, itensor, axis=0)
+
+    model = model.transform(InferLookupLayer())
+    model = model.transform(SpecializeLayers(fpga_part))
+    assert model.graph.node[0].op_type == "Lookup_hls"
+    inst = getHWCustomOp(model.graph.node[0])
+    inst.set_nodeattr("ram_style", "ultra")
+    assert inst.uram_estimation() > 0
+
+    model = model.transform(GiveUniqueNodeNames())
+    model = model.transform(PrepareIP(fpga_part, 10))
+    model = model.transform(HLSSynthIP())
+    model = model.transform(SetExecMode("rtlsim"))
+    model = model.transform(PrepareRTLSim())
+    ret_sim = execute_onnx(model, {iname: itensor})
+    assert (exp_out == ret_sim[oname]).all()
+
+
+@pytest.mark.fpgadataflow
+@pytest.mark.vivado
+@pytest.mark.slow
 def test_fpgadataflow_lookup_external():
     fpga_part = "xczu3eg-sbva484-1-e"
     edt = DataType["INT8"]

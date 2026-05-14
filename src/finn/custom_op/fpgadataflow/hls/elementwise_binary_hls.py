@@ -121,6 +121,7 @@ class ElementwiseBinaryOperation_hls(
         out_shape = self.get_folded_output_shape(ind=0)
         # Type of memory to use for storing constant parameters
         ram_style = RAM_STYLES[self.get_nodeattr("ram_style")]
+        storage_type = "RAM_S2P" if ram_style == "URAM" else "ROM_2P"
 
         # Check whether there are already pragmas in the code generation
         # dictionary
@@ -161,7 +162,7 @@ class ElementwiseBinaryOperation_hls(
                 # Add pragma configuring the storage type to use for the parameter
                 # tensors: This is a constant parameter implemented as dual-port ROM
                 self.code_gen_dict["$PRAGMAS$"].append(
-                    f"#pragma HLS BIND_STORAGE variable=lhs type=ROM_2P impl={ram_style}"
+                    f"#pragma HLS BIND_STORAGE variable=lhs type={storage_type} impl={ram_style}"
                 )
                 # Add pragma to partition the parameter tensor along the last
                 # dimensions, i.e., the PE dimension for parallel access
@@ -203,7 +204,7 @@ class ElementwiseBinaryOperation_hls(
                 # Add pragma configuring the storage type to use for the parameter
                 # tensors: This is a constant parameter implemented as dual-port ROM
                 self.code_gen_dict["$PRAGMAS$"].append(
-                    f"#pragma HLS BIND_STORAGE variable=rhs type=ROM_2P impl={ram_style}"
+                    f"#pragma HLS BIND_STORAGE variable=rhs type={storage_type} impl={ram_style}"
                 )
                 # Add pragma to partition the parameter tensor along the last
                 # dimensions, i.e., the PE dimension for parallel access
