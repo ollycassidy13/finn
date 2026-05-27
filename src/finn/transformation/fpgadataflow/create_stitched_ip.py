@@ -71,6 +71,42 @@ def is_external_output(node, model, i):
     return False
 
 
+def _read_verilog_source_list(path):
+    if not os.path.isfile(path):
+        return []
+    with open(path) as f:
+        return f.read().split()
+
+
+def _write_unique_verilog_source_list(path, sources):
+    seen = set()
+    unique_sources = []
+    for source in sources:
+        if source in seen:
+            continue
+        seen.add(source)
+        unique_sources.append(source)
+    with open(path, "w") as f:
+        for source in unique_sources:
+            f.write(source + "\n")
+
+
+def _append_nested_verilog_sources(model, source_list_path):
+    """Add nested stitched-IP sources that Vivado's top-level get_files can miss."""
+
+    if not os.path.isfile(source_list_path):
+        return
+    sources = _read_verilog_source_list(source_list_path)
+    for node in model.get_nodes_by_op_type("FINNLoop"):
+        node_inst = getHWCustomOp(node, model)
+        code_gen_dir = node_inst.get_nodeattr("code_gen_dir_ipgen")
+        if not code_gen_dir:
+            continue
+        nested_source_list = os.path.join(code_gen_dir, "all_verilog_srcs.txt")
+        sources.extend(_read_verilog_source_list(nested_source_list))
+    _write_unique_verilog_source_list(source_list_path, sources)
+
+
 class CreateStitchedIP(Transformation):
     """Create a Vivado IP Block Design project from all the generated IPs of a
     graph. All nodes in the graph must have the fpgadataflow backend attribute,
@@ -727,6 +763,7 @@ close $ofile
         bash_command = ["bash", make_project_sh]
         process_compile = subprocess.Popen(bash_command, stdout=subprocess.PIPE)
         process_compile.communicate()
+        _append_nested_verilog_sources(model, v_file_list)
         # wrapper may be created in different location depending on Vivado version
         if not os.path.isfile(wrapper_filename):
             # check in alternative location (.gen instead of .srcs)
