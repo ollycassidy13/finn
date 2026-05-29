@@ -262,7 +262,7 @@ ipx::archive_core $Top.zip [ipx::current_core]
 """
 
 ip_gen_loop_op = """
-create_project @PRJNAME@ @PRJFOLDER@ -part @FPGAPART@
+create_project @PRJNAME@ @PRJFOLDER@ -part @FPGAPART@ -force
 set_msg_config -id {[BD 41-1753]} -suppress
 create_ip -name axis_register_slice -vendor xilinx.com -library ip -version 1.1 -module_name axis_reg_32
 set_property CONFIG.TDATA_NUM_BYTES {4} [get_ips axis_reg_32]

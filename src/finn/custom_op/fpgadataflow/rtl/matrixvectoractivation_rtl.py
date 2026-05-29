@@ -248,6 +248,36 @@ class MVAU_rtl(MVAU, RTLBackend):
         # ~0.741 ns seems the worst-case delay through first DSP
         # ~0.605 ns seems to be (on average) delay for all subsequent DSPs
         # clk >= (critical_path_dsps - 1) * 0.605 + 0.741
+        # Leave a guard for clock skew and routing variation. The default keeps
+        # existing behavior, while timing experiments can override it per build.
+        dsp_chain_guard_ns = float(os.environ.get("FINN_MVAU_DSP_CHAIN_GUARD_NS", "0.2"))
+        node_guards = os.environ.get("FINN_MVAU_DSP_CHAIN_GUARD_NS_BY_NODE", "")
+        for override in node_guards.replace(";", ",").split(","):
+            if not override.strip():
+                continue
+            if "=" in override:
+                node_name, guard_ns = override.split("=", 1)
+            elif ":" in override:
+                node_name, guard_ns = override.split(":", 1)
+            else:
+                continue
+            if node_name.strip() == self.onnx_node.name:
+                dsp_chain_guard_ns = float(guard_ns)
+                break
+        config_guards = os.environ.get("FINN_MVAU_DSP_CHAIN_GUARD_NS_BY_CONFIG", "")
+        for override in config_guards.split(";"):
+            parts = [part.strip() for part in override.split(":")]
+            if len(parts) == 4:
+                node_name, pe, simd, guard_ns = parts
+                if node_name != self.onnx_node.name:
+                    continue
+            elif len(parts) == 3:
+                pe, simd, guard_ns = parts
+            else:
+                continue
+            if int(pe) == self.get_nodeattr("PE") and int(simd) == self.get_nodeattr("SIMD"):
+                dsp_chain_guard_ns = float(guard_ns)
+                break
         if self.get_nodeattr("pumpedCompute"):
             ref_clk = clk / 2
             simd_factor = 6
@@ -261,10 +291,12 @@ class MVAU_rtl(MVAU, RTLBackend):
         consider lowering the targeted clock frequency!""".format(
             ref_clk
         )
-        critical_path_dsps = np.floor((ref_clk - 0.741) / 0.605 + 1)
+        critical_path_budget = max(ref_clk - 0.741 - dsp_chain_guard_ns, 0)
+        critical_path_dsps = np.floor(critical_path_budget / 0.605 + 1)
         max_chain_len = np.ceil(self.get_nodeattr("SIMD") / simd_factor)
         dsp_chain_len = critical_path_dsps if critical_path_dsps < max_chain_len else max_chain_len
-        return dsp_chain_len
+        dsp_chain_len = max(dsp_chain_len, 1)
+        return int(dsp_chain_len)
 
     def _resolve_dsp_version(self, dsp_block):
         # Based on target device and activation/weight-width, choose the

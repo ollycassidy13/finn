@@ -144,6 +144,9 @@ def get_simkernel_so():
         simkernel_so = "libxv_simulator_kernel.so"
     else:
         simkernel_so = "librdi_simulator_kernel.so"
+    simkernel_path = os.path.join(vivado_path, "lib", "lnx64.o", simkernel_so)
+    if os.path.isfile(simkernel_path):
+        return simkernel_path
     return simkernel_so
 
 

@@ -570,11 +570,25 @@ class FINNLoop(HWCustomOp, RTLBackend):
             node_inst = getHWCustomOp(node)  # No model context: read only
             if node_inst.get_nodeattr("mlo_max_iter"):
                 # calculate TAP_REP
-                # for Thresholds this value is fm size / pe
-                # for all other param nodes it is 1
+                # Thresholding consumes one set selector per output beat.
+                # Internal-decoupled MVAUs consume one set selector per input vector
+                # to stream a complete weight matrix for that vector.
+                # Other MLO parameter streams, such as elementwise memstreams,
+                # consume one selector per frame because their memstream depth
+                # already covers the full folded parameter stream.
                 tap_rep = 1
                 if node.op_type == "Thresholding_rtl":
-                    tap_rep = np.prod(node_inst.get_folded_input_shape(0)[:-1])
+                    tap_rep = int(np.prod(node_inst.get_folded_input_shape(0)[:-1]))
+                elif node.op_type == "MVAU_rtl":
+                    tap_rep = int(np.prod(node_inst.get_nodeattr("numInputVectors")))
+                    theight = node_inst.get_nodeattr("TH")
+                    if theight > 1:
+                        if tap_rep % theight != 0:
+                            raise RuntimeError(
+                                f"{node.name}: MLO MVAU selector repetitions "
+                                f"{tap_rep} are not divisible by TH={theight}"
+                            )
+                        tap_rep = tap_rep // theight
                 stname = "IN_%s" % graph_inputs.index(node.input[1])
                 code_gen_dict = {
                     "$MODULE_NAME$": [stname],
@@ -759,7 +773,7 @@ class FINNLoop(HWCustomOp, RTLBackend):
                 st_tmpl_names.append(fname[:-2])
         sourcefiles = st_verilog_files + [stream_tap_dir + "stream_tap.sv", skid_file]
         for f in sourcefiles:
-            cmd += ["add_files -copy_to %s -norecurse %s" % (source_target, f)]
+            cmd += ["add_files -force -copy_to %s -norecurse %s" % (source_target, f)]
 
         adj_list = adjacency_list(
             loop_body,
@@ -1117,7 +1131,7 @@ class FINNLoop(HWCustomOp, RTLBackend):
             "-of [ipx::get_bus_interfaces -of [ipx::current_core ]]]"
         )
         example_data_dir = os.environ["FINN_ROOT"] + "/src/finn/qnn-data/mdd-data"
-        shutil.copytree(example_data_dir, vivado_stitch_proj_dir + "/data")
+        shutil.copytree(example_data_dir, vivado_stitch_proj_dir + "/data", dirs_exist_ok=True)
 
         template = templates.ip_gen_loop_op
 
@@ -1172,7 +1186,10 @@ class FINNLoop(HWCustomOp, RTLBackend):
 
         intf_names["aximm"] = []
         # AXI4 master interface for intermediate buffering between layers
-        # TODO: rename because it might not be hbm?
+        # TODO: rename because it might not be hbm.
+        # On non-HBM boards such as VCK190, this port should be treated as a
+        # generic external-memory AXI interface and connected to board memory
+        # such as DDR/NoC at integration time.
         intf_names["aximm"].append(["m_axi_hbm", str(addr_bits)])
         intf_names["axilite"] = []
 

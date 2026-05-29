@@ -921,8 +921,13 @@ class MVAU(HWCustomOp):
             case "dynamic" | "external":
                 intf_names["s_axis"].append(("in1_V", self.get_instream_width_padded(1)))
             case "internal_decoupled":
+                if self.get_nodeattr("mlo_max_iter") > 0:
+                    stream_width = DataType.get_smallest_possible(
+                        self.get_nodeattr("mlo_max_iter")
+                    ).bitwidth()
+                    intf_names["s_axis"].append(("in1_V", stream_width))
                 # only expose axilite interface if attribute is set
-                if self.get_nodeattr("runtime_writeable_weights"):
+                elif self.get_nodeattr("runtime_writeable_weights"):
                     intf_names["axilite"] = ["s_axilite"]
 
         return intf_names
@@ -985,6 +990,13 @@ class MVAU(HWCustomOp):
                 "create_bd_intf_pin -mode Slave "
                 "-vlnv xilinx.com:interface:axis_rtl:1.0 /%s/%s" % (node_name, din_name)
             )
+            if mem_mode == "internal_decoupled" and self.get_nodeattr("mlo_max_iter") > 0:
+                idx_name = self.get_verilog_top_module_intf_names()["s_axis"][1][0]
+                cmd.append(
+                    "create_bd_intf_pin -mode Slave "
+                    "-vlnv xilinx.com:interface:axis_rtl:1.0 /%s/%s"
+                    % (node_name, idx_name)
+                )
 
             #
             # Instantiate either the HLS or RTL IP depending on operator
@@ -1019,7 +1031,7 @@ class MVAU(HWCustomOp):
                         dyn_rtllib_dir + "dynamic_load.sv",
                     ]
                     for f in sourcefiles:
-                        cmd += ["add_files -copy_to %s -norecurse %s" % (source_target, f)]
+                        cmd += ["add_files -force -copy_to %s -norecurse %s" % (source_target, f)]
                     strm_inst = node_name + "_wdynld"
                     strm_out_name = "m_axis_0"
 
@@ -1097,7 +1109,7 @@ class MVAU(HWCustomOp):
                         if file.endswith(".sv") or file.endswith(".svh"):
                             sourcefiles.append(os.path.join(dma_rtllib_dir + "cdma_x/", file))
                     for f in sourcefiles:
-                        cmd += ["add_files -copy_to %s -norecurse %s" % (source_target, f)]
+                        cmd += ["add_files -force -copy_to %s -norecurse %s" % (source_target, f)]
                     strm_inst = node_name + "_fetch_weights"
                     strm_out_name = "out0_V"
                     # update intf dict to remove weights input and replace with index/tap input
@@ -1124,7 +1136,7 @@ class MVAU(HWCustomOp):
                         ms_rtllib_dir + "memstream.sv",
                     ]
                     for f in sourcefiles:
-                        cmd += ["add_files -copy_to %s -norecurse %s" % (source_target, f)]
+                        cmd += ["add_files -force -copy_to %s -norecurse %s" % (source_target, f)]
                     strm_inst = node_name + "_wstrm"
                     strm_out_name = "m_axis_0"
 
@@ -1173,6 +1185,13 @@ class MVAU(HWCustomOp):
             # if using 2x pumped memory, connect the memstreamer's 2x clk input
             # to the 2x clock port. otherwise connect it to the regular clock port.
             if mem_mode == "internal_decoupled":
+                if self.get_nodeattr("mlo_max_iter") > 0:
+                    idx_name = self.get_verilog_top_module_intf_names()["s_axis"][1][0]
+                    cmd.append(
+                        "connect_bd_intf_net [get_bd_intf_pins %s/%s] "
+                        "[get_bd_intf_pins %s/%s/s_axis_0]"
+                        % (node_name, idx_name, node_name, strm_inst)
+                    )
                 if self.get_nodeattr("pumpedMemory"):
                     cmd.append(
                         "connect_bd_net [get_bd_pins %s/%s] [get_bd_pins %s/%s/ap_clk2x]"

@@ -9,10 +9,17 @@ import json
 import numpy as np
 import os
 import re
+import shutil
 import socket
 import subprocess
+import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from qonnx.core.datatype import DataType
 from qonnx.core.modelwrapper import ModelWrapper
 from qonnx.util.basic import gen_finn_dt_tensor
@@ -239,6 +246,7 @@ def build_config(args: argparse.Namespace, output_dir: Path) -> DataflowBuildCon
         auto_fifo_depths=False,
         fifosim_n_inferences=args.fifosim_n_inferences,
         rtlsim_batch_size=args.rtlsim_batch_size,
+        stitched_rtlsim_liveness_threshold=args.stitched_rtlsim_liveness_threshold,
         stitched_ip_gen_dcp=args.mode == "dcp" or args.stitched_ip_dcp,
         no_stdout_redirect=True,
         enable_build_pdb_debug=False,
@@ -270,12 +278,50 @@ BUILD_CSV_FIELDS = [
     "dcp_paths",
 ]
 
+FAILED_VIVADO_ARTIFACT_SUFFIXES = {
+    ".csv",
+    ".jou",
+    ".json",
+    ".log",
+    ".rpt",
+    ".str",
+    ".tcl",
+    ".txt",
+    ".xdc",
+    ".xml",
+}
+FAILED_VIVADO_TOP_DCP_NAMES = {
+    "finn_design.dcp",
+    "finn_design_routed.dcp",
+}
+
+FAILED_VIVADO_CLEAN_PREFIXES = (
+    "code_gen_ipgen_",
+    "rtlsim_",
+    "vivado_stitch_proj_",
+    "vivado_zynq_proj_",
+    "vitis_floorplan_",
+    "vitis_link_proj_",
+)
+
+VIVADO_HARD_FAILURE_MARKERS = (
+    "opt_design failed",
+    "place_design failed",
+    "route_design failed",
+    "Macro Placer failed",
+    "Command failed: Placer could not place all instances",
+)
+
 
 def _load_json(path: Path) -> dict:
     if not path.is_file():
         return {}
-    with path.open() as f:
-        return json.load(f)
+    try:
+        with path.open() as f:
+            return json.load(f)
+    except json.JSONDecodeError as exc:
+        print(f"WARNING: ignoring invalid JSON in {path}: {exc}")
+        return {}
 
 
 def _json_cell(payload) -> str:
@@ -345,6 +391,21 @@ def _partition_resource_summary(report_path: Path) -> dict:
     return {}
 
 
+def _stitched_ip_dirs(output_dir: Path) -> list[Path]:
+    """Return current and retained failed-build stitched-IP locations."""
+
+    candidates = [
+        output_dir / "stitched_ip",
+        output_dir / "failed_vivado_artifacts" / "output_dir" / "stitched_ip",
+    ]
+    return [path for path in candidates if path.is_dir()]
+
+
+def _primary_stitched_ip_dir(output_dir: Path) -> Path:
+    stitched_dirs = _stitched_ip_dirs(output_dir)
+    return stitched_dirs[0] if stitched_dirs else output_dir / "stitched_ip"
+
+
 def _resource_summary(ooc: dict, post_synth: dict, output_dir: Path) -> dict:
     resource_keys = [
         "LUT",
@@ -359,13 +420,24 @@ def _resource_summary(ooc: dict, post_synth: dict, output_dir: Path) -> dict:
     ]
     source = ooc or post_synth or {}
     summary = {key: source[key] for key in resource_keys if key in source}
-    partition_report = output_dir / "stitched_ip" / "finn_design_partition_util.rpt"
-    summary.update(_partition_resource_summary(partition_report))
+    for stitched_ip_dir in _stitched_ip_dirs(output_dir):
+        partition_report = stitched_ip_dir / "finn_design_partition_util.rpt"
+        partition_summary = _partition_resource_summary(partition_report)
+        if partition_summary:
+            summary.update(partition_summary)
+            break
     return summary
 
 
 def _timing_report_summary(output_dir: Path) -> dict:
-    report_path = output_dir / "stitched_ip" / "ooc_timing.rpt"
+    report_path = None
+    for stitched_ip_dir in _stitched_ip_dirs(output_dir):
+        candidate = stitched_ip_dir / "ooc_timing.rpt"
+        if candidate.is_file():
+            report_path = candidate
+            break
+    if report_path is None:
+        report_path = output_dir / "stitched_ip" / "ooc_timing.rpt"
     if not report_path.is_file():
         return {}
 
@@ -417,23 +489,42 @@ def _parse_rtlsim_results(results_path: Path) -> dict:
     return parsed
 
 
-def _latest_rtlsim_results(output_dir: Path) -> Path | None:
+def _latest_rtlsim_results(
+    output_dir: Path,
+    search_build_dir: bool = True,
+    min_mtime: float | None = None,
+) -> Path | None:
     candidates = list(output_dir.glob("**/results.txt"))
     build_dir = os.environ.get("FINN_BUILD_DIR")
-    if build_dir:
+    if search_build_dir and build_dir:
         build_path = Path(build_dir)
         if build_path.is_dir():
             candidates.extend(build_path.glob("rtlsim*/results.txt"))
-    candidates = [path for path in candidates if path.is_file()]
-    if not candidates:
+    fresh_candidates = []
+    for path in candidates:
+        if not path.is_file():
+            continue
+        if min_mtime is not None and path.stat().st_mtime < min_mtime:
+            continue
+        fresh_candidates.append(path)
+    if not fresh_candidates:
         return None
-    return max(candidates, key=lambda path: path.stat().st_mtime)
+    return max(fresh_candidates, key=lambda path: path.stat().st_mtime)
 
 
-def _rtlsim_summary(output_dir: Path, clock_ns: float) -> dict:
-    results_path = _latest_rtlsim_results(output_dir)
+def _rtlsim_summary(
+    output_dir: Path,
+    clock_ns: float,
+    search_build_dir: bool = True,
+    min_mtime: float | None = None,
+) -> dict:
+    results_path = _latest_rtlsim_results(output_dir, search_build_dir, min_mtime)
     if results_path is None:
         return {}
+    return _rtlsim_summary_from_path(results_path, clock_ns)
+
+
+def _rtlsim_summary_from_path(results_path: Path, clock_ns: float) -> dict:
     raw = _parse_rtlsim_results(results_path)
     summary = {"rtlsim_results_path": str(results_path.resolve())}
     for src_key, dst_key in [
@@ -468,11 +559,71 @@ def _timing_status(ooc: dict, timing_report: dict | None = None) -> str:
     return "met"
 
 
+def _timing_wns(ooc: dict, timing_report: dict) -> float | str:
+    if "WNS" in ooc:
+        return ooc["WNS"]
+    return timing_report.get("setup_worst_slack_ns", "")
+
+
+def _timing_fmax_mhz(ooc: dict, timing_report: dict, clock_ns: float) -> float | str:
+    if "fmax_mhz" in ooc:
+        return ooc["fmax_mhz"]
+    setup_slack = timing_report.get("setup_worst_slack_ns")
+    if setup_slack is None:
+        return ""
+    period_ns = float(clock_ns) - float(setup_slack)
+    if period_ns <= 0:
+        return ""
+    return 1000.0 / period_ns
+
+
+def _output_timing_failed(output_dir: Path) -> bool:
+    report_dir = output_dir / "report"
+    ooc = _load_json(report_dir / "ooc_synth_and_timing.json")
+    timing_report = _timing_report_summary(output_dir)
+    return _timing_status(ooc, timing_report) == "failed"
+
+
+def _vivado_failure_summary(args: argparse.Namespace, output_dir: Path) -> dict:
+    current_stitched_ip_dir = output_dir / "stitched_ip"
+    stitched_ip_dirs = (
+        [current_stitched_ip_dir]
+        if current_stitched_ip_dir.is_dir()
+        else _stitched_ip_dirs(output_dir)
+    )
+    for stitched_ip_dir in stitched_ip_dirs:
+        log_path = stitched_ip_dir / "vivado.log"
+        if not log_path.is_file():
+            continue
+        with log_path.open(errors="replace") as f:
+            for line in f:
+                stripped = line.strip()
+                if any(marker in stripped for marker in VIVADO_HARD_FAILURE_MARKERS):
+                    return {
+                        "vivado_failure": stripped,
+                        "vivado_log_path": str(log_path.resolve()),
+                    }
+
+    expects_dcp_timing = args.mode == "dcp" or bool(getattr(args, "stitched_ip_dcp", False))
+    if expects_dcp_timing and _stitched_ip_dirs(output_dir) and not _timing_report_summary(
+        output_dir
+    ):
+        return {
+            "vivado_failure": "missing expected ooc_timing.rpt after stitched IP DCP generation",
+        }
+    return {}
+
+
+def _output_vivado_failed(args: argparse.Namespace, output_dir: Path) -> bool:
+    return bool(_vivado_failure_summary(args, output_dir))
+
+
 def record_build_result(
     args: argparse.Namespace,
     output_dir: Path,
     model_path: Path,
     return_code: int,
+    build_started_at: float | None = None,
 ) -> Path:
     output_dir = output_dir.resolve()
     report_dir = output_dir / "report"
@@ -482,12 +633,33 @@ def record_build_result(
     ooc = _load_json(report_dir / "ooc_synth_and_timing.json")
     post_synth = _load_json(report_dir / "post_synth_resources.json")
     step_times = _load_json(output_dir / "time_per_step.json")
-    dcp_paths = sorted(str(path.resolve()) for path in output_dir.glob("stitched_ip/**/*.dcp"))
+    dcp_paths = sorted(
+        str(path.resolve())
+        for stitched_ip_dir in _stitched_ip_dirs(output_dir)
+        for path in stitched_ip_dir.glob("**/*.dcp")
+    )
     timing_report = _timing_report_summary(output_dir)
-    rtlsim_summary = _rtlsim_summary(output_dir, args.clock_ns)
+    search_build_rtlsim = args.mode == "full-rtlsim" or bool(
+        getattr(args, "stitched_rtlsim", False)
+    )
+    rtlsim_results_file = getattr(args, "rtlsim_results_file", None)
+    if rtlsim_results_file:
+        rtlsim_results_path = Path(rtlsim_results_file)
+        if not rtlsim_results_path.is_absolute():
+            rtlsim_results_path = repo_path(rtlsim_results_file)
+        rtlsim_summary = _rtlsim_summary_from_path(rtlsim_results_path, args.clock_ns)
+    else:
+        rtlsim_summary = _rtlsim_summary(
+            output_dir,
+            args.clock_ns,
+            search_build_dir=search_build_rtlsim,
+            min_mtime=build_started_at,
+        )
     resources = _resource_summary(ooc, post_synth, output_dir)
     resources.update(timing_report)
     resources.update(rtlsim_summary)
+    vivado_failure = _vivado_failure_summary(args, output_dir)
+    resources.update(vivado_failure)
 
     row = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -498,9 +670,9 @@ def record_build_result(
         "clock_ns": args.clock_ns,
         "target_fps": args.target_fps,
         "return_code": return_code,
-        "timing_status": _timing_status(ooc, timing_report),
-        "wns_ns": ooc.get("WNS", ""),
-        "fmax_mhz": ooc.get("fmax_mhz", ""),
+        "timing_status": "failed" if vivado_failure else _timing_status(ooc, timing_report),
+        "wns_ns": _timing_wns(ooc, timing_report),
+        "fmax_mhz": _timing_fmax_mhz(ooc, timing_report, args.clock_ns),
         "estimated_throughput_fps": rtlsim_summary.get(
             "rtlsim_throughput_fps", ooc.get("estimated_throughput_fps", "")
         ),
@@ -510,7 +682,7 @@ def record_build_result(
         "output_dir": str(output_dir),
         "model_path": str(model_path.resolve()),
         "report_dir": str(report_dir),
-        "stitched_ip_dir": str((output_dir / "stitched_ip").resolve()),
+        "stitched_ip_dir": str(_primary_stitched_ip_dir(output_dir).resolve()),
         "dcp_paths": _json_cell(dcp_paths),
     }
 
@@ -518,11 +690,198 @@ def record_build_result(
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     write_header = not csv_path.is_file()
     with csv_path.open("a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=BUILD_CSV_FIELDS)
+        writer = csv.DictWriter(f, fieldnames=BUILD_CSV_FIELDS, lineterminator="\n")
         if write_header:
             writer.writeheader()
         writer.writerow(row)
     return csv_path
+
+
+def _snapshot_dir_entries(path: Path | None) -> set[Path]:
+    if path is None or not path.is_dir():
+        return set()
+    return {entry.resolve() for entry in path.iterdir()}
+
+
+def _failed_cleanup_snapshot(output_dir: Path) -> dict:
+    finn_build_dir_env = os.environ.get("FINN_BUILD_DIR")
+    finn_build_dir = Path(finn_build_dir_env).resolve() if finn_build_dir_env else None
+    return {
+        "finn_build_dir": finn_build_dir,
+        "finn_build_entries": _snapshot_dir_entries(finn_build_dir),
+        "output_entries": _snapshot_dir_entries(output_dir),
+    }
+
+
+def _looks_like_vivado_cleanup_dir(path: Path) -> bool:
+    name = path.name
+    return (
+        name in {".Xil", "vivado_ip_cache"}
+        or name.startswith(FAILED_VIVADO_CLEAN_PREFIXES)
+        or ("vivado" in name.lower() and "proj" in name.lower())
+    )
+
+
+def _artifact_file(path: Path, rel_path: Path) -> bool:
+    if not path.is_file():
+        return False
+    suffix = path.suffix.lower()
+    if suffix == ".dcp":
+        return len(rel_path.parts) == 1 and path.name in FAILED_VIVADO_TOP_DCP_NAMES
+    return suffix in FAILED_VIVADO_ARTIFACT_SUFFIXES
+
+
+def _preserve_failed_vivado_artifacts(src: Path, dst_root: Path) -> int:
+    if not src.exists():
+        return 0
+    preserved = 0
+    for artifact in sorted(src.rglob("*")):
+        rel = artifact.relative_to(src)
+        if not _artifact_file(artifact, rel):
+            continue
+        dst = dst_root / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            artifact.rename(dst)
+        except OSError:
+            shutil.copy2(artifact, dst)
+            artifact.unlink()
+        preserved += 1
+    return preserved
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_dir():
+        shutil.rmtree(path)
+    elif path.exists():
+        path.unlink()
+
+
+def _path_contains(candidate: Path, active_path: Path) -> bool:
+    try:
+        active_path.relative_to(candidate)
+    except ValueError:
+        return False
+    return True
+
+
+def _path_has_active_process_handle(path: Path) -> bool:
+    try:
+        candidate = path.resolve()
+    except OSError:
+        return False
+    proc_root = Path("/proc")
+    if not proc_root.is_dir():
+        return False
+    for proc_entry in proc_root.iterdir():
+        if not proc_entry.name.isdigit():
+            continue
+        try:
+            cwd = (proc_entry / "cwd").resolve()
+        except OSError:
+            cwd = None
+        if cwd is not None and _path_contains(candidate, cwd):
+            return True
+
+        fd_dir = proc_entry / "fd"
+        try:
+            fd_entries = tuple(fd_dir.iterdir())
+        except OSError:
+            continue
+        for fd_entry in fd_entries:
+            try:
+                fd_target = os.readlink(fd_entry)
+            except OSError:
+                continue
+            if fd_target.endswith(" (deleted)"):
+                fd_target = fd_target[: -len(" (deleted)")]
+            if not fd_target.startswith("/"):
+                continue
+            try:
+                fd_path = Path(fd_target).resolve()
+            except OSError:
+                continue
+            if _path_contains(candidate, fd_path):
+                return True
+    return False
+
+
+def cleanup_failed_vivado_projects(
+    output_dir: Path,
+    snapshot: dict,
+    keep_artifacts: bool,
+) -> None:
+    """Remove bulky Vivado/IP project dirs left by an unsuccessful TinyDeiT build."""
+
+    candidates: list[tuple[str, Path, Path]] = []
+    finn_build_dir = snapshot.get("finn_build_dir")
+    finn_entries = snapshot.get("finn_build_entries", set())
+    if finn_build_dir is not None and finn_build_dir.is_dir():
+        for entry in finn_build_dir.iterdir():
+            entry_resolved = entry.resolve()
+            if entry_resolved in finn_entries:
+                continue
+            if _looks_like_vivado_cleanup_dir(entry):
+                candidates.append(("finn_build_dir", entry, finn_build_dir))
+
+    output_entries = snapshot.get("output_entries", set())
+    if output_dir.is_dir():
+        for entry in output_dir.iterdir():
+            entry_resolved = entry.resolve()
+            if entry_resolved in output_entries:
+                continue
+            if entry.name == "stitched_ip" or _looks_like_vivado_cleanup_dir(entry):
+                candidates.append(("output_dir", entry, output_dir.resolve()))
+
+    if not candidates:
+        print("Failed-build Vivado cleanup: no new Vivado project dirs to remove.")
+        return
+
+    has_output_stitched_archive = any(
+        source_name == "output_dir" and candidate.name == "stitched_ip"
+        for source_name, candidate, _ in candidates
+    )
+    artifact_root = output_dir / "failed_vivado_artifacts"
+    cleaned = 0
+    preserved = 0
+    skipped_duplicate_artifacts = 0
+    for source_name, candidate, expected_parent in candidates:
+        try:
+            if candidate.resolve().parent != expected_parent:
+                print(f"Skipping cleanup candidate outside expected parent: {candidate}")
+                continue
+            if _path_has_active_process_handle(candidate):
+                print(f"Skipping cleanup candidate with active process handle: {candidate}")
+                continue
+            archive_dir = artifact_root / source_name / candidate.name
+            duplicate_stitched_project = (
+                has_output_stitched_archive
+                and source_name == "finn_build_dir"
+                and candidate.name.startswith("vivado_stitch_proj_")
+                and (candidate / "finn_design_routed.dcp").is_file()
+                and (candidate / "ooc_timing.rpt").is_file()
+            )
+            if keep_artifacts and not duplicate_stitched_project:
+                preserved += _preserve_failed_vivado_artifacts(candidate, archive_dir)
+            elif duplicate_stitched_project:
+                skipped_duplicate_artifacts += 1
+            _remove_path(candidate)
+            cleaned += 1
+        except Exception as exc:
+            print(f"WARNING: failed to clean Vivado candidate {candidate}: {exc}")
+
+    if keep_artifacts:
+        print(
+            "Failed-build Vivado cleanup: removed "
+            f"{cleaned} dirs, preserved {preserved} report/DCP artifacts under {artifact_root}."
+        )
+        if skipped_duplicate_artifacts:
+            print(
+                "Failed-build Vivado cleanup: skipped artifact preservation for "
+                f"{skipped_duplicate_artifacts} duplicate stitched Vivado project dirs."
+            )
+    else:
+        print(f"Failed-build Vivado cleanup: removed {cleaned} dirs.")
 
 
 def prepare_cppsim(model: ModelWrapper, num_workers: int | None) -> ModelWrapper:
@@ -621,7 +980,25 @@ def main() -> None:
     )
     parser.add_argument("--node-by-node", action="store_true")
     parser.add_argument("--stitched-rtlsim", action="store_true")
+    parser.add_argument(
+        "--stitched-rtlsim-liveness-threshold",
+        type=int,
+        default=None,
+        help=(
+            "Override the stitched-IP rtlsim liveness watchdog in cycles. "
+            "Useful for MLO graphs whose top-level loop estimate is much larger "
+            "than the measured end-to-end RTL interval."
+        ),
+    )
     parser.add_argument("--stitched-ip-dcp", action="store_true")
+    parser.add_argument(
+        "--rtlsim-results-file",
+        default=None,
+        help=(
+            "Use an existing FINN rtlsim results.txt file for CSV throughput "
+            "accounting without rerunning stitched-IP rtlsim."
+        ),
+    )
     parser.add_argument("--prepared-model", default=None)
     parser.add_argument("--reference-model", default=None)
     parser.add_argument(
@@ -629,8 +1006,37 @@ def main() -> None:
     )
     parser.add_argument("--reference-cppsim-workers", type=int, default=None)
     parser.add_argument("--skip-reference-io", action="store_true")
+    parser.add_argument(
+        "--cleanup-failed-vivado",
+        dest="cleanup_failed_vivado",
+        action="store_true",
+        help=(
+            "After an unsuccessful build, remove new Vivado/IP project dirs created "
+            "under FINN_BUILD_DIR and this output dir."
+        ),
+    )
+    parser.add_argument(
+        "--no-cleanup-failed-vivado",
+        dest="cleanup_failed_vivado",
+        action="store_false",
+    )
+    parser.add_argument(
+        "--keep-failed-vivado-artifacts",
+        dest="keep_failed_vivado_artifacts",
+        action="store_true",
+        help=(
+            "Keep diagnostic reports/logs plus top-level design DCPs before "
+            "deleting failed Vivado project dirs."
+        ),
+    )
+    parser.add_argument(
+        "--discard-failed-vivado-artifacts",
+        dest="keep_failed_vivado_artifacts",
+        action="store_false",
+    )
     parser.set_defaults(reference_cppsim_prepare=True)
     parser.set_defaults(folding_two_pass_relaxation=False, post_transpose_folding=True)
+    parser.set_defaults(cleanup_failed_vivado=True, keep_failed_vivado_artifacts=True)
     args = parser.parse_args()
 
     if args.folding_target_cycles and args.folding_target_cycles > 0:
@@ -640,51 +1046,86 @@ def main() -> None:
 
     output_dir = repo_path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    build_started_at = time.time()
+    cleanup_snapshot = _failed_cleanup_snapshot(output_dir)
 
-    if args.prepared_model is None:
-        prep_args = argparse.Namespace(
-            input=args.input,
-            output_dir=str(output_dir / "prepare"),
-            board=args.board,
-            clock_ns=args.clock_ns,
-            target_fps=args.target_fps,
-            depth=12,
-            skip_streamline=False,
-            collapse_pwpolyf=True,
-            mlo=True,
-            save_intermediate=True,
-        )
-        model_path = prepare(prep_args)
-    else:
-        model_path = repo_path(args.prepared_model)
-
-    cfg = build_config(args, output_dir)
-    if not args.skip_reference_io and cfg.verify_steps:
-        reference_model_path = (
-            repo_path(args.reference_model) if args.reference_model else model_path
-        )
-        generate_reference_io(
-            reference_model_path,
-            output_dir,
-            args.seed,
-            model_path,
-            args.reference_cppsim_prepare,
-            args.reference_cppsim_workers,
-        )
     ret = -1
+    model_path: Path | None = None
+    cleanup_done = False
+
+    def cleanup_failed_once() -> None:
+        nonlocal cleanup_done
+        if args.cleanup_failed_vivado and not cleanup_done:
+            cleanup_failed_vivado_projects(
+                output_dir, cleanup_snapshot, args.keep_failed_vivado_artifacts
+            )
+            cleanup_done = True
+
     try:
+        if args.prepared_model is None:
+            prep_args = argparse.Namespace(
+                input=args.input,
+                output_dir=str(output_dir / "prepare"),
+                board=args.board,
+                clock_ns=args.clock_ns,
+                target_fps=args.target_fps,
+                depth=12,
+                skip_streamline=False,
+                collapse_pwpolyf=True,
+                mlo=True,
+                save_intermediate=True,
+            )
+            model_path = prepare(prep_args)
+        else:
+            model_path = repo_path(args.prepared_model)
+
+        cfg = build_config(args, output_dir)
+        if not args.skip_reference_io and cfg.verify_steps:
+            reference_model_path = (
+                repo_path(args.reference_model) if args.reference_model else model_path
+            )
+            generate_reference_io(
+                reference_model_path,
+                output_dir,
+                args.seed,
+                model_path,
+                args.reference_cppsim_prepare,
+                args.reference_cppsim_workers,
+            )
         ret = build.build_dataflow_cfg(str(model_path), cfg)
-    except Exception:
-        csv_path = record_build_result(args, output_dir, model_path, ret)
-        print(f"Build CSV: {csv_path}")
+    except BaseException:
+        cleanup_failed_once()
+        if model_path is not None:
+            csv_path = record_build_result(
+                args, output_dir, model_path, ret, build_started_at
+            )
+            print(f"Build CSV: {csv_path}")
         print(f"Build output: {output_dir}")
         raise
-    else:
-        csv_path = record_build_result(args, output_dir, model_path, ret)
+
+    if ret != 0:
+        cleanup_failed_once()
+        csv_path = record_build_result(args, output_dir, model_path, ret, build_started_at)
         print(f"Build CSV: {csv_path}")
         print(f"Build output: {output_dir}")
-        if ret != 0:
-            raise SystemExit(ret)
+        raise SystemExit(ret)
+
+    else:
+        vivado_failed = _output_vivado_failed(args, output_dir)
+        timing_failed = _output_timing_failed(output_dir)
+        if vivado_failed:
+            print("Vivado implementation failed; treating build as unsuccessful for cleanup.")
+            cleanup_failed_once()
+            csv_path = record_build_result(args, output_dir, model_path, 1, build_started_at)
+            print(f"Build CSV: {csv_path}")
+            print(f"Build output: {output_dir}")
+            raise SystemExit(1)
+        if timing_failed:
+            print("Timing failed; treating build as unsuccessful for Vivado cleanup.")
+            cleanup_failed_once()
+        csv_path = record_build_result(args, output_dir, model_path, ret, build_started_at)
+        print(f"Build CSV: {csv_path}")
+        print(f"Build output: {output_dir}")
 
 
 if __name__ == "__main__":

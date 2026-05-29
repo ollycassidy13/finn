@@ -12,7 +12,8 @@
 
 module stream_tap #(
 	int unsigned  DATA_WIDTH,
-	int unsigned  TAP_REP = 1
+	int unsigned  TAP_REP = 1,
+	int unsigned  TAP_QUEUE_DEPTH = 16
 )(
 	input	logic  clk,
 	input	logic  rst,
@@ -30,60 +31,79 @@ module stream_tap #(
 	input	logic  trdy
 );
 
-	localparam int unsigned  CNT_BITS = 1 + $clog2(TAP_REP);
-	typedef logic signed [CNT_BITS-1:0]  cnt_t;
+	localparam int unsigned  CNT_BITS = (TAP_REP <= 1) ? 1 : $clog2(TAP_REP + 1);
+	localparam int unsigned  QUEUE_DEPTH = (TAP_QUEUE_DEPTH < 1) ? 1 : TAP_QUEUE_DEPTH;
+	localparam int unsigned  PTR_BITS = (QUEUE_DEPTH <= 1) ? 1 : $clog2(QUEUE_DEPTH);
+	localparam int unsigned  LEVEL_BITS = $clog2(QUEUE_DEPTH + 1);
+	typedef logic [CNT_BITS-1:0]  cnt_t;
+	typedef logic [PTR_BITS-1:0]  ptr_t;
+	typedef logic [LEVEL_BITS-1:0]  level_t;
 
-	// Input Sidestep Register Stage
-	logic [DATA_WIDTH-1:0]  A = 'x;
-	logic  AVld = 0;
-	assign	irdy = !AVld;
-
-	// Output Register & Skid Buffer on Tap
-	logic [DATA_WIDTH-1:0]  B = 'x;
+	logic [DATA_WIDTH-1:0]  ODat = 'x;
 	logic  OVld = 0;
-	cnt_t  TCnt = '{ CNT_BITS-1: 0, default: 'x };
-	logic  TLst = 'x;
-	uwire  tvld0 = TCnt[$left(TCnt)];
-	uwire  trdy0;
 
-	assign	odat = B;
+	logic [QUEUE_DEPTH-1:0][DATA_WIDTH-1:0]  QDat = 'x;
+	cnt_t  QRemain [QUEUE_DEPTH] = '{ default: 'x };
+	ptr_t  QRd = '0;
+	ptr_t  QWr = '0;
+	level_t  QLevel = '0;
+
+	uwire  oready = !OVld || ordy;
+	uwire  TVld = QLevel != 0;
+	uwire  tap_done = TVld && trdy && (QRemain[QRd] == cnt_t'(1));
+	uwire  qready = (TAP_REP == 0) || (QLevel < level_t'(QUEUE_DEPTH)) || tap_done;
+	uwire  push = ivld && irdy && (TAP_REP != 0);
+
+	function automatic ptr_t ptr_next(input ptr_t ptr);
+		return (ptr == ptr_t'(QUEUE_DEPTH-1)) ? ptr_t'(0) : ptr_t'(ptr + ptr_t'(1));
+	endfunction
+
+	assign	irdy = oready && qready;
+	assign	odat = ODat;
 	assign	ovld = OVld;
-	skid #(.DATA_WIDTH(DATA_WIDTH), .FEED_STAGES(0)) tap_skid (
-		.clk, .rst,
-		.idat(B),    .ivld(tvld0), .irdy(trdy0),
-		.odat(tdat), .ovld(tvld),  .ordy(trdy)
-	);
+	assign	tdat = QDat[QRd];
+	assign	tvld = TVld;
 
-	uwire  bload = (ordy || !ovld) && ((trdy0 && TLst) || !tvld0);
 	always_ff @(posedge clk) begin
 		if(rst) begin
-			A <= 'x;
-			AVld <= 0;
-
-			B <= 'x;
+			ODat <= 'x;
 			OVld <= 0;
-			TCnt <= '{ CNT_BITS-1: 0, default: 'x };
-			TLst <= 'x;
+
+			QDat <= 'x;
+			QRemain <= '{ default: 'x };
+			QRd <= '0;
+			QWr <= '0;
+			QLevel <= '0;
 		end
 		else begin
-			automatic logic  iavl = AVld || ivld;
-
-			// A Input Register Control
-			if(irdy)  A <= idat;
-			AVld <= iavl && !bload;
-
-			// B Output Register Control
-			if(bload) begin
-				B <= AVld? A : idat;
-				OVld <= iavl;
-				TCnt <= iavl? -TAP_REP : '{ CNT_BITS-1: 0, default: 'x };
-				TLst <= iavl? TAP_REP == 1 : 'x;
+			if(ivld && irdy) begin
+				ODat <= idat;
+				OVld <= 1;
 			end
-			else begin
-				automatic logic  tick = tvld0 && trdy0;
-				OVld <= OVld && !ordy;
-				TCnt <= TCnt + tick;
-				TLst <= (TCnt == cnt_t'(-2)) && tick;
+			else if(OVld && ordy) begin
+				OVld <= 0;
+			end
+
+			if(TVld && trdy && !tap_done) begin
+				QRemain[QRd] <= QRemain[QRd] - cnt_t'(1);
+			end
+
+			if(push) begin
+				QDat[QWr] <= idat;
+				QRemain[QWr] <= cnt_t'(TAP_REP);
+				QWr <= ptr_next(QWr);
+			end
+			if(tap_done) begin
+				QRd <= ptr_next(QRd);
+			end
+
+			case ({push, tap_done})
+				2'b10: QLevel <= QLevel + level_t'(1);
+				2'b01: QLevel <= QLevel - level_t'(1);
+				default: QLevel <= QLevel;
+			endcase
+			if(tap_done && !push) begin
+				QRemain[QRd] <= 'x;
 			end
 		end
 	end

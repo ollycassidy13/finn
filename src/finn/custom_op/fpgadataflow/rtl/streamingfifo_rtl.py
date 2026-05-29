@@ -34,6 +34,7 @@ from finn.custom_op.fpgadataflow.rtlbackend import RTLBackend
 from finn.custom_op.fpgadataflow.streamingfifo import StreamingFIFO
 
 MAX_QSRL_VAR_BITS = 1000000
+MAX_QSRL_CHUNK_WIDTH = 512
 
 
 class StreamingFIFO_rtl(StreamingFIFO, RTLBackend):
@@ -41,7 +42,12 @@ class StreamingFIFO_rtl(StreamingFIFO, RTLBackend):
         super().__init__(onnx_node, **kwargs)
 
     def _generate_qsrl_fifo_impl(self, width, depth, count_range):
-        if width * max(depth - 1, 1) <= MAX_QSRL_VAR_BITS:
+        state_bits_per_lane = max(depth - 1, 1)
+        max_chunk_width = min(
+            MAX_QSRL_CHUNK_WIDTH,
+            max(1, MAX_QSRL_VAR_BITS // state_bits_per_lane),
+        )
+        if width <= max_chunk_width:
             return """\tQ_srl #(.depth(%d), .width(%d)) fifo (
 \t\t.clock(ap_clk), .reset(!ap_rst_n),
 \t\t.i_d(in0_V_TDATA), .i_v(in0_V_TVALID), .i_r(in0_V_TREADY),
@@ -52,7 +58,6 @@ class StreamingFIFO_rtl(StreamingFIFO, RTLBackend):
                 width,
             )
 
-        max_chunk_width = max(1, MAX_QSRL_VAR_BITS // max(depth - 1, 1))
         chunks = []
         lo = 0
         while lo < width:
@@ -62,11 +67,13 @@ class StreamingFIFO_rtl(StreamingFIFO, RTLBackend):
             lo = hi + 1
 
         impl = [
-            "\t// Split wide Q_srl storage to stay within Vivado variable-size limits.",
+            "\t// Split wide Q_srl storage to reduce control fanout and stay within Vivado variable-size limits.",
             "\twire [%d-1:0] fifo_i_r;" % len(chunks),
             "\twire [%d-1:0] fifo_o_v;" % len(chunks),
-            "\tassign in0_V_TREADY = fifo_i_r[0];",
-            "\tassign out0_V_TVALID = fifo_o_v[0];",
+            "\tassign in0_V_TREADY = &fifo_i_r;",
+            "\tassign out0_V_TVALID = &fifo_o_v;",
+            "\twire fifo_i_v = in0_V_TVALID & in0_V_TREADY;",
+            "\twire fifo_o_r = out0_V_TREADY & out0_V_TVALID;",
         ]
         for idx, (lo, hi, chunk_width) in enumerate(chunks):
             impl += [
@@ -74,9 +81,9 @@ class StreamingFIFO_rtl(StreamingFIFO, RTLBackend):
                 "\twire %s maxcount_%d;" % (count_range, idx),
                 "\tQ_srl #(.depth(%d), .width(%d)) fifo_chunk_%d (" % (depth, chunk_width, idx),
                 "\t\t.clock(ap_clk), .reset(!ap_rst_n),",
-                "\t\t.i_d(in0_V_TDATA[%d:%d]), .i_v(in0_V_TVALID), .i_r(fifo_i_r[%d]),"
+                "\t\t.i_d(in0_V_TDATA[%d:%d]), .i_v(fifo_i_v), .i_r(fifo_i_r[%d]),"
                 % (hi, lo, idx),
-                "\t\t.o_d(out0_V_TDATA[%d:%d]), .o_v(fifo_o_v[%d]), .o_r(out0_V_TREADY),"
+                "\t\t.o_d(out0_V_TDATA[%d:%d]), .o_v(fifo_o_v[%d]), .o_r(fifo_o_r),"
                 % (hi, lo, idx),
                 "\t\t.count(count_%d), .maxcount(maxcount_%d)" % (idx, idx),
                 "\t);",

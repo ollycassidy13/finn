@@ -157,6 +157,18 @@ logic [ADDR_BITS-1:0] s0_dma_in_tdata;
 logic s0_dma_out_tvalid, s0_dma_out_tready;
 logic [ADDR_BITS-1:0] s0_dma_out_tdata;
 
+logic idx_next_in_tvalid, idx_next_in_tready;
+logic [IDX_BITS-1:0] idx_next_in_tdata;
+
+Q_srl #(
+    .depth(QDEPTH), .width(IDX_BITS)
+) inst_queue_next_idx (
+    .clock(aclk), .reset(!aresetn),
+    .count(), .maxcount(),
+    .i_d(idx_next_in_tdata), .i_v(idx_next_in_tvalid), .i_r(idx_next_in_tready),
+    .o_d(m_idx_tdata), .o_v(m_idx_tvalid), .o_r(m_idx_tready)
+);
+
 Q_srl #(
     .depth(QDEPTH), .width(ADDR_BITS)
 ) inst_queue_s0_dma (
@@ -181,7 +193,7 @@ always_comb begin: NSL_WR
 
     case (state_wr_C)
         ST_WR_IDLE:
-            state_wr_N = (idx_in_tvalid && m_idx_tready) ? ST_WR_SEND : ST_WR_IDLE;
+            state_wr_N = (idx_in_tvalid && idx_next_in_tready) ? ST_WR_SEND : ST_WR_IDLE;
 
         ST_WR_SEND:
             state_wr_N = (wr_rdy && s0_dma_in_tready) ? ST_WR_IDLE : ST_WR_SEND;
@@ -193,8 +205,8 @@ always_comb begin: DP_WR
     wr_ptr_N = wr_ptr_C;
 
     idx_in_tready = 1'b0;
-    m_idx_tvalid = 1'b0;
-    m_idx_tdata = idx_in_tdata + 1;
+    idx_next_in_tvalid = 1'b0;
+    idx_next_in_tdata = idx_in_tdata + 1;
 
     s0_dma_in_tvalid = 1'b0;
     s0_dma_in_tdata = l_offsets[wr_ptr_C];
@@ -202,12 +214,9 @@ always_comb begin: DP_WR
 
     case (state_wr_C)
         ST_WR_IDLE: begin
-            if(idx_in_tvalid) begin
-                m_idx_tvalid = 1'b1;
-
-                if(m_idx_tready) begin
-                    idx_in_tready = 1'b1;
-                end
+            if(idx_in_tvalid && idx_next_in_tready) begin
+                idx_in_tready = 1'b1;
+                idx_next_in_tvalid = 1'b1;
             end
         end
 

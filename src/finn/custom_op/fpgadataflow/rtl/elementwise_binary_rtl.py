@@ -328,7 +328,7 @@ class ElementwiseBinary_rtl(ElementwiseBinaryOperation, RTLBackend):
                 ms_rtllib_dir + "memstream.sv",
             ]
             for f in sourcefiles:
-                cmd += ["add_files -copy_to %s -norecurse %s" % (source_target, f)]
+                cmd += ["add_files -force -copy_to %s -norecurse %s" % (source_target, f)]
             strm_inst = node_name + "_wstrm"
             cmd.append(
                 "create_bd_cell -type hier -reference %s /%s/%s"
@@ -380,7 +380,7 @@ class ElementwiseBinary_rtl(ElementwiseBinaryOperation, RTLBackend):
         sourcefiles = self.get_rtl_file_list(abspath=True)
 
         for f in sourcefiles:
-            cmd.append("add_files -copy_to %s -norecurse %s" % (source_target, f))
+            cmd.append("add_files -force -copy_to %s -norecurse %s" % (source_target, f))
 
         # Always create the core inside the hierarchical wrapper
         cmd.append(

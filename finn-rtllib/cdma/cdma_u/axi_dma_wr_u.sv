@@ -318,7 +318,10 @@ always_comb begin
             if (!m_axi_awvalid_reg) begin
                 m_axi_awaddr_next = addr_reg;
                 m_axi_awlen_next = output_cycle_count_next;
-                m_axi_awvalid_next = s_axis_write_data_tvalid || !first_cycle_reg;
+                // AXI permits the write address to be issued before write data.
+                // Do not wait for TVALID here: upstream width converters can
+                // hold their output valid low until the DMA presents TREADY.
+                m_axi_awvalid_next = 1'b1;
 
                 if (m_axi_awvalid_next) begin
                     addr_next = addr_reg + tr_word_count_next;
