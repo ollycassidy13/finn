@@ -68,6 +68,7 @@ coverage.xml
 build/*
 scripts_finn/*
 tinydeit/build/*
+full_siglip/build/*
 dist/*
 sdist/*
 docs/api/*
@@ -90,6 +91,7 @@ MANIFEST
 /data/
 *.csv
 !tinydeit/builds.csv
+!full_siglip/builds.csv
 
 # Google Drive key for dashboard
 /gdrive-key/
