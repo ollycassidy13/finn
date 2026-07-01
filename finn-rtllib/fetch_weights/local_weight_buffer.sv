@@ -37,7 +37,8 @@ module local_weight_buffer #(
     int unsigned              MH,
     int unsigned              MW,
     int unsigned              N_REPS,
-    int unsigned              DBG = 0
+    int unsigned              DBG = 0,
+    parameter                 RAM_STYLE = "block"
 ) (
     input	logic  clk,
     input	logic  rst,
@@ -60,12 +61,12 @@ localparam int unsigned  NF = MH/PE;
 localparam int unsigned  N_TLS = SF * NF;
 
 localparam int unsigned SIMD_BITS = (SIMD == 1) ? 1 : $clog2(SIMD);
-localparam int unsigned PE_BITS = (PE == 1) ? 1 : $clog2(PE);
 localparam int unsigned WGT_ADDR_BITS = $clog2(NF * SF);
 localparam int unsigned RAM_BITS = (SIMD*WEIGHT_WIDTH + 7)/8 * 8;
 localparam int unsigned WGT_EN_BITS = RAM_BITS / 8;
 localparam int unsigned N_TLS_BITS = $clog2(N_TLS);
-localparam int unsigned N_REPS_BITS = $clog2(N_REPS);
+localparam int unsigned N_REPS_BITS = (N_REPS == 1) ? 1 : $clog2(N_REPS);
+localparam logic [PE-1:0] PE_ONEHOT_INIT = {{(PE-1){1'b0}}, 1'b1};
 
 typedef enum logic[1:0]  {ST_WR_0, ST_WR_0_WAIT, ST_WR_1, ST_WR_1_WAIT} state_wr_t;
 typedef enum logic  {ST_RD_0, ST_RD_1} state_rd_t;
@@ -79,7 +80,7 @@ state_wr_t state_wr_C = ST_WR_0, state_wr_N;
 state_rd_t state_rd_C = ST_RD_0, state_rd_N;
 
 logic[N_TLS_BITS-1:0] wr_pntr_C = '0, wr_pntr_N;
-logic[PE_BITS-1:0] curr_pe_C = '0, curr_pe_N;
+logic[PE-1:0] curr_pe_oh_C = PE_ONEHOT_INIT, curr_pe_oh_N;
 
 // -- Signals
 logic [1:0][PE-1:0][WGT_EN_BITS-1:0] a_we; // Bank enables
@@ -92,13 +93,13 @@ always_ff @( posedge clk ) begin : REG_PROC_WR
         state_wr_C <= ST_WR_0;
 
         wr_pntr_C <= '0;
-        curr_pe_C <= '0;
+        curr_pe_oh_C <= PE_ONEHOT_INIT;
     end
     else begin
         state_wr_C <= state_wr_N;
 
         wr_pntr_C <= wr_pntr_N;
-        curr_pe_C <= curr_pe_N;
+        curr_pe_oh_C <= curr_pe_oh_N;
     end
 end
 
@@ -108,7 +109,7 @@ always_comb begin : NSL_PROC_WR
 
     case (state_wr_C)
         ST_WR_0:
-            if((curr_pe_C == PE - 1) && (wr_pntr_C == N_TLS - 1) && ivld) begin
+            if(curr_pe_oh_C[PE-1] && (wr_pntr_C == N_TLS - 1) && ivld) begin
                 state_wr_N = (state_rd_C == ST_RD_0) ? ST_WR_1 : ST_WR_0_WAIT;
             end
 
@@ -116,7 +117,7 @@ always_comb begin : NSL_PROC_WR
             state_wr_N = (state_rd_C == ST_RD_0) ? ST_WR_1 : ST_WR_0_WAIT;
 
         ST_WR_1:
-            if((curr_pe_C == PE - 1) && (wr_pntr_C == N_TLS - 1) && ivld) begin
+            if(curr_pe_oh_C[PE-1] && (wr_pntr_C == N_TLS - 1) && ivld) begin
                 state_wr_N = (state_rd_C == ST_RD_1) ? ST_WR_0 : ST_WR_1_WAIT;
             end
 
@@ -129,7 +130,7 @@ end
 // -- DP
 always_comb begin : DP_PROC_WR
     wr_pntr_N = wr_pntr_C;
-    curr_pe_N = curr_pe_C;
+    curr_pe_oh_N = curr_pe_oh_C;
 
     // Input
     irdy = 1'b0;
@@ -148,13 +149,14 @@ always_comb begin : DP_PROC_WR
 
             if(ivld) begin
                 for(int i = 0; i < PE; i++) begin
-                    if(curr_pe_C == i) begin
+                    if(curr_pe_oh_C[i]) begin
                         a_we[state_wr_C == ST_WR_1][i] = '1;
                     end
                 end
 
-                curr_pe_N = (curr_pe_C == PE-1) ? 0 : curr_pe_C + 1;
-                wr_pntr_N = (curr_pe_C == PE-1) ? ((wr_pntr_C == N_TLS-1) ? 0 : wr_pntr_C + 1) : wr_pntr_C;
+                // Avoid a wide decoded PE write-enable fanout on large MVAUs.
+                curr_pe_oh_N = curr_pe_oh_C[PE-1] ? PE_ONEHOT_INIT : (curr_pe_oh_C << 1);
+                wr_pntr_N = curr_pe_oh_C[PE-1] ? ((wr_pntr_C == N_TLS-1) ? 0 : wr_pntr_C + 1) : wr_pntr_C;
             end
         end
     endcase
@@ -287,13 +289,13 @@ for(genvar i = 0; i < 2; i++) begin
         ram_p_c #(
             .ADDR_BITS(WGT_ADDR_BITS),
             .DATA_BITS(RAM_BITS),
-            .RAM_STYLE("block")
+            .RAM_STYLE(RAM_STYLE)
         ) inst_ram_tp_c (
             .clk(clk),
             .a_en(1'b1),
             .a_we(a_we[i][j]),
             .a_addr(a_addr[i]),
-            .b_en(ordy),
+            .b_en(1'b1),
             .b_addr(b_addr[i]),
             .a_data_in(a_data_in[i]),
             .a_data_out(),

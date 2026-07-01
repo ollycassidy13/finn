@@ -32,6 +32,24 @@ class ElementwiseBinary_rtl(ElementwiseBinaryOperation, RTLBackend):
     def __init__(self, onnx_node, **kwargs):
         super().__init__(onnx_node, **kwargs)
 
+    def _input_is_streamed_broadcast(self, ind):
+        style = self.get_nodeattr("lhs_style" if ind == 0 else "rhs_style")
+        shape = self.get_normal_input_shape(ind)
+        out_shape = self.get_normal_output_shape()
+        return (
+            style == "input"
+            and self.broadcast_last_axis
+            and len(shape) > 0
+            and len(out_shape) > 0
+            and shape[-1] == 1
+            and out_shape[-1] != 1
+        )
+
+    def get_instream_width(self, ind=0):
+        if self._input_is_streamed_broadcast(ind):
+            return self.get_input_datatype(ind).bitwidth()
+        return super().get_instream_width(ind)
+
     def get_nodeattr_types(self):
         my_attrs = {}
         my_attrs.update(ElementwiseBinaryOperation.get_nodeattr_types(self))
@@ -165,8 +183,8 @@ class ElementwiseBinary_rtl(ElementwiseBinaryOperation, RTLBackend):
             "A_CORE_STREAM_BITS": a_core_stream_bits,
             "B_CORE_STREAM_BITS": b_core_stream_bits,
             "O_CORE_STREAM_BITS": o_core_stream_bits,
-            "A_STREAM_BITS": roundup_to_integer_multiple(a_core_stream_bits, 8),
-            "B_STREAM_BITS": roundup_to_integer_multiple(b_core_stream_bits, 8),
+            "A_STREAM_BITS": self.get_instream_width_padded(0),
+            "B_STREAM_BITS": self.get_instream_width_padded(1),
             "O_STREAM_BITS": roundup_to_integer_multiple(o_core_stream_bits, 8),
         }
 
@@ -346,11 +364,37 @@ class ElementwiseBinary_rtl(ElementwiseBinaryOperation, RTLBackend):
                 "connect_bd_net [get_bd_pins %s/%s] [get_bd_pins %s/%s/ap_clk2x]"
                 % (node_name, clk_name, node_name, strm_inst)
             )
+            selector_stream_connected = mlo and rhs_style == "input"
             # MLO mode: connect external in1_V to memstream input
-            if mlo and rhs_style == "input":
+            if selector_stream_connected:
                 cmd.append(
                     "connect_bd_intf_net [get_bd_intf_pins %s/in1_V] "
                     "[get_bd_intf_pins %s/%s/s_axis_0]" % (node_name, node_name, strm_inst)
+                )
+            else:
+                if mlo:
+                    raise RuntimeError(
+                        f"{node_name}: MLO memstream selector is not connected "
+                        f"(rhs_style={rhs_style})"
+                    )
+                const_inst = f"{strm_inst}_selector_zero"
+                cmd.append(
+                    "create_bd_cell -type ip -vlnv xilinx.com:ip:xlconstant:1.1 "
+                    "/%s/%s" % (node_name, const_inst)
+                )
+                cmd.append(
+                    "set_property -dict [list CONFIG.CONST_WIDTH {1} CONFIG.CONST_VAL {0}] "
+                    "[get_bd_cells %s/%s]" % (node_name, const_inst)
+                )
+                cmd.append(
+                    "connect_bd_net [get_bd_pins %s/%s/dout] "
+                    "[get_bd_pins %s/%s/s_axis_0_tvalid]"
+                    % (node_name, const_inst, node_name, strm_inst)
+                )
+                cmd.append(
+                    "connect_bd_net [get_bd_pins %s/%s/dout] "
+                    "[get_bd_pins %s/%s/s_axis_0_tdata]"
+                    % (node_name, const_inst, node_name, strm_inst)
                 )
             # Connect memstream output to core input
             cmd.append(
@@ -482,35 +526,27 @@ class ElementwiseBinary_rtl(ElementwiseBinaryOperation, RTLBackend):
         folded_weight_shape = self.get_folded_input_shape(1)
         weight_tensor = weights.reshape(folded_weight_shape).copy()
 
-        # When broadcasting the last axis (rhs_shape[-1]==1), replicate the
-        # scalar value across PE lanes so memstream provides PE values per cycle
-        if self.broadcast_last_axis and weight_tensor.shape[-1] == 1:
+        export_wdt = self.get_input_datatype(1)
+        weight_width = self.get_instream_width(1)
+
+        # When a const broadcast uses a PE-wide stream, replicate the scalar
+        # value across PE lanes. MLO parameter broadcasts keep a narrow scalar
+        # stream and the RTL wrapper expands it to all PE lanes.
+        if (
+            self.broadcast_last_axis
+            and weight_tensor.shape[-1] == 1
+            and weight_width > export_wdt.bitwidth()
+        ):
             weight_tensor = np.tile(
                 weight_tensor, (1,) * (len(weight_tensor.shape) - 1) + (self.pe,)
             )
 
         if "decoupled" in weight_file_mode:
-            num_w_reps = np.prod(self.calc_numInputVectors())
-            base_wmem = super().calc_wmem()
-            if num_w_reps % base_wmem != 0:
-                raise RuntimeError(
-                    f"{self.onnx_node.name}: const stream length {base_wmem} "
-                    f"does not divide output stream length {num_w_reps}"
-                )
-            # base_wmem folded const vectors already exist in weight_tensor.
-            # Tile only enough to cover the output stream, otherwise broadcast
-            # constants such as [1, C] for [1, T, C] expand quadratically.
-            tile_factor = int(num_w_reps // base_wmem)
-            weight_tensor = np.tile(
-                weight_tensor, (tile_factor,) + (1,) * (len(weight_tensor.shape) - 1)
-            )
             weight_tensor = weight_tensor.reshape(1, -1, weight_tensor.shape[-1]).copy()
             if weight_file_mode == "decoupled_npy":
                 np.save(weight_file_name, weight_tensor)
                 return
 
-        export_wdt = self.get_input_datatype(1)
-        weight_width = self.get_instream_width(1)
         weight_width_padded = roundup_to_integer_multiple(weight_width, 4)
 
         if weight_file_mode == "decoupled_verilog_dat":
@@ -537,8 +573,28 @@ class ElementwiseBinary_rtl(ElementwiseBinaryOperation, RTLBackend):
                 f.write(val + "\n")
 
     def calc_wmem(self):
-        num_w_reps = np.prod(self.calc_numInputVectors())
-        return int(num_w_reps)
+        return int(super().calc_wmem())
+
+    def calc_wmem_reps(self):
+        """Return how many times the compact parameter stream is replayed.
+
+        Elementwise constants often broadcast across non-channel axes, for
+        example a [C] scale applied to [N, T, C]. The memstream only needs to
+        store the compact [C] stream; regular single-set memstreams cycle on
+        their own, and FINNLoop multi-set memstreams use this value as the
+        stream-tap repetition count for each loop iteration.
+        """
+
+        base_wmem = int(super().calc_wmem())
+        num_w_reps = int(np.prod(self.calc_numInputVectors()))
+        if base_wmem <= 0:
+            raise RuntimeError(f"{self.onnx_node.name}: invalid const stream length {base_wmem}")
+        if num_w_reps % base_wmem != 0:
+            raise RuntimeError(
+                f"{self.onnx_node.name}: const stream length {base_wmem} "
+                f"does not divide output stream length {num_w_reps}"
+            )
+        return int(num_w_reps // base_wmem)
 
     def calc_numInputVectors(self):
         folded_lhs = self.get_folded_input_shape(0)

@@ -28,6 +28,7 @@
 
 import pytest
 
+from functools import partial
 import numpy as np
 from onnx import TensorProto, helper
 from qonnx.core.datatype import DataType
@@ -54,6 +55,7 @@ from finn.transformation.fpgadataflow.set_exec_mode import SetExecMode
 from finn.transformation.fpgadataflow.set_fifo_depths import InsertAndSetFIFODepths
 from finn.transformation.fpgadataflow.specialize_layers import SpecializeLayers
 from finn.transformation.streamline.round_thresholds import RoundAndClipThresholds
+from finn.analysis.fpgadataflow.res_estimation import res_estimation
 from finn.util.basic import getHWCustomOp, get_vivado_version, is_versal, make_build_dir
 
 test_fpga_part = "xczu3eg-sbva484-1-e"
@@ -558,6 +560,96 @@ def test_fpgadataflow_thresholding_hls_internal_embedded_ram_style(
         exp_cycles = exp_cycles_dict[node.name]
         assert np.isclose(exp_cycles, cycles_rtlsim, atol=15)
         assert exp_cycles != 0
+
+
+@pytest.mark.fpgadataflow
+def test_rtl_thresholding_per_tensor_mlo_resource_estimate_uses_compact_cf():
+    num_input_channels = 768
+    num_steps = 255
+    pe = 1
+    mlo_sets = 12
+    input_data_type = DataType["INT8"]
+    threshold_data_type = DataType["INT8"]
+    output_data_type = DataType["UINT8"]
+    activation_bias = 0
+    num_input_vecs = [1]
+    fpgapart = "xcvc1902-vsva2197-2MP-e-S"
+
+    thresholds = np.arange(-128, 127, dtype=np.float32).reshape(1, num_steps)
+    model = make_single_multithresholding_modelwrapper(
+        thresholds,
+        input_data_type,
+        threshold_data_type,
+        output_data_type,
+        activation_bias,
+        num_input_vecs,
+        num_input_channels,
+    )
+
+    model = model.transform(InferThresholdingLayer())
+    node = model.graph.node[0]
+    inst = getHWCustomOp(node)
+    inst.set_nodeattr("preferred_impl_style", "rtl")
+    model = model.transform(SpecializeLayers(fpgapart))
+    model = model.transform(GiveUniqueNodeNames())
+
+    node = model.graph.node[0]
+    inst = getHWCustomOp(node, model)
+    inst.set_nodeattr("PE", pe)
+    inst.set_nodeattr("mlo_max_iter", mlo_sets)
+
+    expected_depths = [
+        (threshold_data_type.bitwidth(), mlo_sets * (2**stage))
+        for stage in range(output_data_type.bitwidth())
+    ]
+    assert inst.get_nodeattr("numThresholdChannels") == 1
+    assert inst.get_pe_mem_geometries() == expected_depths
+
+    # Legacy checkpoints may not have numThresholdChannels. Resource analysis
+    # should recover it from the model tensor shape before estimating resources.
+    inst.set_nodeattr("numThresholdChannels", 0)
+    model.analysis(partial(res_estimation, fpgapart=fpgapart))
+    inst = getHWCustomOp(model.graph.node[0], model)
+    assert inst.get_nodeattr("numThresholdChannels") == 1
+    assert inst.get_pe_mem_geometries() == expected_depths
+
+
+@pytest.mark.fpgadataflow
+def test_rtl_thresholding_non_mlo_ties_unused_selector(tmp_path):
+    num_input_channels = 4
+    num_steps = 3
+    pe = 2
+    thresholds = np.tile(np.arange(num_steps, dtype=np.float32), (num_input_channels, 1))
+    model = make_single_multithresholding_modelwrapper(
+        thresholds,
+        DataType["INT8"],
+        DataType["INT8"],
+        DataType["UINT2"],
+        0,
+        [1],
+        num_input_channels,
+    )
+
+    model = model.transform(InferThresholdingLayer())
+    node = model.graph.node[0]
+    inst = getHWCustomOp(node)
+    inst.set_nodeattr("preferred_impl_style", "rtl")
+    model = model.transform(SpecializeLayers("xcvc1902-vsva2197-2MP-e-S"))
+    model = model.transform(GiveUniqueNodeNames())
+
+    node = model.graph.node[0]
+    node.name = "Thresholding_rtl_0"
+    inst = getHWCustomOp(node)
+    inst.set_nodeattr("PE", pe)
+    inst.set_nodeattr("code_gen_dir_ipgen", str(tmp_path))
+    inst.set_nodeattr("gen_top_module", node.name)
+
+    ipi_cmd = "\n".join(inst.code_generation_ipi())
+
+    assert "Thresholding_rtl_0_selector_zero" in ipi_cmd
+    assert "Thresholding_rtl_0_selector_data_zero" in ipi_cmd
+    assert "in1_V_TVALID" in ipi_cmd
+    assert "in1_V_TDATA" in ipi_cmd
 
 
 @pytest.mark.fpgadataflow

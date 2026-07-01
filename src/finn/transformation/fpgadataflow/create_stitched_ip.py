@@ -107,6 +107,202 @@ def _append_nested_verilog_sources(model, source_list_path):
     _write_unique_verilog_source_list(source_list_path, sources)
 
 
+def _vivado_error_markers(vivado_stitch_proj_dir):
+    markers = []
+    for root, _, files in os.walk(vivado_stitch_proj_dir):
+        if ".vivado.error.rst" in files:
+            markers.append(os.path.join(root, ".vivado.error.rst"))
+    return sorted(markers)
+
+
+def _first_vivado_error(marker_path):
+    runme_log = os.path.join(os.path.dirname(marker_path), "runme.log")
+    if not os.path.isfile(runme_log):
+        return ""
+    with open(runme_log, errors="ignore") as f:
+        for line in f:
+            if "ERROR:" in line:
+                return line.strip()
+    return ""
+
+
+def _check_vivado_stitch_outputs(vivado_stitch_proj_dir, block_name, run_synth, run_pnr, returncode):
+    failures = []
+    if returncode != 0:
+        failures.append("make_project.sh exited with return code %d" % returncode)
+
+    for marker in _vivado_error_markers(vivado_stitch_proj_dir):
+        message = "Vivado child run failed: %s" % marker
+        first_error = _first_vivado_error(marker)
+        if first_error:
+            message += " (%s)" % first_error
+        failures.append(message)
+
+    expected_files = []
+    if run_synth:
+        expected_files.extend(
+            [
+                os.path.join(vivado_stitch_proj_dir, block_name + ".dcp"),
+                os.path.join(vivado_stitch_proj_dir, block_name + ".xdc"),
+            ]
+        )
+    if run_pnr:
+        expected_files.extend(
+            [
+                os.path.join(vivado_stitch_proj_dir, block_name + "_routed.dcp"),
+                os.path.join(vivado_stitch_proj_dir, "ooc_utilization.rpt"),
+                os.path.join(vivado_stitch_proj_dir, "ooc_timing.rpt"),
+                os.path.join(vivado_stitch_proj_dir, "ooc_route_status.rpt"),
+                os.path.join(vivado_stitch_proj_dir, "ooc_metadata.txt"),
+            ]
+        )
+    missing = [path for path in expected_files if not os.path.isfile(path)]
+    if missing:
+        failures.append("missing expected Vivado artifact(s): %s" % ", ".join(missing))
+
+    if failures:
+        raise Exception(
+            "CreateStitchedIP Vivado build failed in %s:\n%s"
+            % (vivado_stitch_proj_dir, "\n".join("- " + failure for failure in failures))
+        )
+
+
+def _drop_intermediate_save_bd_design(tcl):
+    """Keep only final BD saves; intermediate saves dominate large stitch runtimes."""
+
+    save_idxs = [i for i, cmd in enumerate(tcl) if cmd.strip() == "save_bd_design"]
+    keep = set(save_idxs[-2:])
+    return [
+        cmd
+        for i, cmd in enumerate(tcl)
+        if cmd.strip() != "save_bd_design" or i in keep
+    ]
+
+
+def _pnr_clock_constraint_cmds(clk_ns, has_clk2x):
+    """Return OOC PNR clock constraints for external 1x/2x clock ports."""
+
+    cmds = [
+        "set ap_clk_port [get_ports ap_clk]",
+        "set ap_clk_existing [get_clocks -quiet -of_objects $ap_clk_port]",
+        "if {[llength $ap_clk_existing] > 0} { delete_clocks $ap_clk_existing }",
+        "create_clock -name ap_clk -period %f $ap_clk_port" % clk_ns,
+    ]
+    if has_clk2x:
+        cmds.extend(
+            [
+                "set ap_clk2x_port [get_ports ap_clk2x]",
+                "set ap_clk2x_existing [get_clocks -quiet -of_objects $ap_clk2x_port]",
+                (
+                    "if {[llength $ap_clk2x_existing] > 0} "
+                    "{ delete_clocks $ap_clk2x_existing }"
+                ),
+                "create_clock -name ap_clk2x -period %f $ap_clk2x_port" % (clk_ns / 2),
+            ]
+        )
+    return cmds
+
+
+def _vivado_directive_cmd(command, directive):
+    directive = directive.strip()
+    if directive:
+        return "%s -directive %s" % (command, directive)
+    return command
+
+
+def _batch_simple_add_files(tcl):
+    """Batch consecutive simple add_files commands to reduce Vivado Tcl overhead."""
+
+    batched = []
+    pending_files = []
+
+    def flush_pending():
+        if len(pending_files) == 1:
+            batched.append("add_files -norecurse %s" % pending_files[0])
+        elif len(pending_files) > 1:
+            batched.append("add_files -norecurse [list %s]" % " ".join(pending_files))
+        pending_files.clear()
+
+    for cmd in tcl:
+        stripped = cmd.strip()
+        if stripped.startswith("add_files -norecurse "):
+            file_arg = stripped[len("add_files -norecurse ") :].strip()
+            if file_arg and not any(ch.isspace() for ch in file_arg):
+                pending_files.append(file_arg)
+                continue
+        flush_pending()
+        batched.append(cmd)
+    flush_pending()
+    return batched
+
+
+def _collapse_generated_ip_repo_path(path):
+    """Return the smallest generated-build root Vivado should scan for this IP."""
+
+    if path.startswith("$"):
+        return path
+    norm_path = os.path.normpath(path)
+    parts = norm_path.split(os.sep)
+    for i, part in enumerate(parts):
+        if part.startswith("finn_temp_file"):
+            return os.sep.join(parts[: i + 1]) or os.sep
+    for i, part in enumerate(parts):
+        if part.startswith("code_gen_ipgen_") or part.startswith("vivado_stitch_proj_"):
+            return os.sep.join(parts[:i]) or os.sep
+    return norm_path
+
+
+def _collapse_ip_repo_paths(ip_dirs, collapse_generated=False):
+    """Deduplicate IP repo paths, optionally collapsing generated per-node repos."""
+
+    paths = list(ip_dirs)
+    has_list_prefix = bool(paths and paths[0] == "list")
+    if has_list_prefix:
+        paths = paths[1:]
+
+    collapsed = []
+    seen = set()
+    for path in paths:
+        repo_path = _collapse_generated_ip_repo_path(path) if collapse_generated else path
+        if repo_path in seen:
+            continue
+        seen.add(repo_path)
+        collapsed.append(repo_path)
+    if has_list_prefix:
+        return ["list"] + collapsed
+    return collapsed
+
+
+def _append_ip_repo_path_cmds(tcl, ip_dirs, max_cmd_chars=20000, collapse_generated=False):
+    """Append bounded Tcl commands for generated IP repository paths."""
+
+    paths = _collapse_ip_repo_paths(ip_dirs, collapse_generated=collapse_generated)
+    if paths and paths[0] == "list":
+        paths = paths[1:]
+    tcl.append("set_property ip_repo_paths [list] [current_project]")
+    chunk = []
+    chunk_chars = 0
+    for path in paths:
+        path_len = len(path) + 1
+        if chunk and chunk_chars + path_len > max_cmd_chars:
+            tcl.append(
+                "set_property ip_repo_paths "
+                "[concat [get_property ip_repo_paths [current_project]] "
+                "[list %s]] [current_project]" % " ".join(chunk)
+            )
+            chunk = []
+            chunk_chars = 0
+        chunk.append(path)
+        chunk_chars += path_len
+    if chunk:
+        tcl.append(
+            "set_property ip_repo_paths "
+            "[concat [get_property ip_repo_paths [current_project]] "
+            "[list %s]] [current_project]" % " ".join(chunk)
+        )
+    tcl.append("update_ip_catalog -rebuild -scan_changes")
+
+
 class CreateStitchedIP(Transformation):
     """Create a Vivado IP Block Design project from all the generated IPs of a
     graph. All nodes in the graph must have the fpgadataflow backend attribute,
@@ -153,6 +349,7 @@ class CreateStitchedIP(Transformation):
         self.s_axis_idx = 0
         self.clock_reset_are_external = False
         self.clock2x_is_external = False
+        self.finnloop_aximm_name_map = {}
         self.create_cmds = []
         self.connect_cmds = []
         # keep track of top-level interface names
@@ -165,14 +362,29 @@ class CreateStitchedIP(Transformation):
             "axilite": [],
         }
 
+    def _top_level_aximm_name(self, base_name, inst_name):
+        """Return a unique top-level AXI-MM port name for the stitched design."""
+
+        used_names = {name for name, _width in self.intf_names["aximm"]}
+        if base_name not in used_names:
+            return base_name
+
+        candidate = f"{inst_name}_{base_name}"
+        suffix = 1
+        while candidate in used_names:
+            candidate = f"{inst_name}_{base_name}_{suffix}"
+            suffix += 1
+        return candidate
+
     def is_double_pumped(self, node, model):
+        inst = getHWCustomOp(node, model)
         if node.op_type.startswith("MVAU"):
-            inst = getHWCustomOp(node, model)
             try:
                 pumped_compute = inst.get_nodeattr("pumpedCompute")
             except AttributeError:
                 pumped_compute = 0
             return pumped_compute or inst.get_nodeattr("pumpedMemory")
+        return bool(inst.get_verilog_top_module_intf_names().get("clk2x", []))
 
     def connect_clk_rst(self, node, model):
         inst_name = node.name
@@ -248,11 +460,13 @@ class CreateStitchedIP(Transformation):
 
             # Determine external interface name and address segment path
             if node.op_type == "FINNLoop":
-                ext_if_name = mm_intf_name[0]
+                pin_name = mm_intf_name[0]
+                ext_if_name = self._top_level_aximm_name(pin_name, inst_name)
+                self.finnloop_aximm_name_map.setdefault(inst_name, {})[pin_name] = ext_if_name
                 self.connect_cmds.append(
-                    "set_property name %s [get_bd_intf_ports %s_0]" % (ext_if_name, ext_if_name)
+                    "set_property name %s [get_bd_intf_ports %s_0]" % (ext_if_name, pin_name)
                 )
-                seg_name = "%s/%s/SEG_%s_Reg" % (inst_name, ext_if_name, ext_if_name)
+                seg_name = "%s/%s/SEG_%s_Reg" % (inst_name, pin_name, ext_if_name)
             else:
                 # Derive a unique name from graph input index or instance name
                 if node.input[1] in inputs:
@@ -418,9 +632,11 @@ class CreateStitchedIP(Transformation):
         global_inp_names = [inp.name for inp in model.graph.input]
         for node in model.graph.node:
             # ensure that all nodes are fpgadataflow, and that IPs are generated
-            assert is_hls_node(node) or is_rtl_node(
-                node
-            ), "All nodes must be FINN fpgadataflow nodes."
+            if not (is_hls_node(node) or is_rtl_node(node)):
+                raise AssertionError(
+                    "All nodes must be FINN fpgadataflow nodes. "
+                    f"Offending node {node.name} has op_type {node.op_type}."
+                )
             node_inst = getHWCustomOp(node, model)
             ip_dir_value = node_inst.get_nodeattr("ip_path")
             assert os.path.isdir(ip_dir_value), "IP generation directory doesn't exist."
@@ -485,10 +701,10 @@ class CreateStitchedIP(Transformation):
         )
         # no warnings on long module names
         tcl.append("set_msg_config -id {[BD 41-1753]} -suppress")
+        # parent-root IP repo scans see non-IP module references next to packaged IP
+        tcl.append("set_msg_config -id {[IP_Flow 19-11780]} -suppress")
         # add all the generated IP dirs to ip_repo_paths
-        ip_dirs_str = " ".join(ip_dirs)
-        tcl.append("set_property ip_repo_paths [%s] [current_project]" % ip_dirs_str)
-        tcl.append("update_ip_catalog")
+        _append_ip_repo_path_cmds(tcl, ip_dirs)
         # create block design and instantiate all layers
         if self.is_mlo:
             block_name = self.ip_name + "_mlo"
@@ -517,6 +733,15 @@ class CreateStitchedIP(Transformation):
         tcl.append("make_wrapper -files [get_files %s] -top" % bd_filename)
         wrapper_filename = "%s/hdl/%s_wrapper.v" % (bd_base, block_name)
         tcl.append("add_files -norecurse %s" % wrapper_filename)
+        tcl.append("generate_target synthesis [get_files %s]" % bd_filename)
+        tcl.append(
+            "set bd_synth_stub_files [glob -nocomplain {%s/ip/*/*_stub.v}]"
+            % bd_base
+        )
+        tcl.append(
+            "if {[llength $bd_synth_stub_files] > 0} { "
+            "add_files -norecurse $bd_synth_stub_files }"
+        )
         model.set_metadata_prop("wrapper_filename", wrapper_filename)
         tcl.append("set_property top %s_wrapper [current_fileset]" % block_name)
         # synthesize to DCP and export stub, DCP and constraints
@@ -546,17 +771,31 @@ class CreateStitchedIP(Transformation):
         if self.run_pnr:
             tcl.append("")
             tcl.append("# --- Place and Route for OOC Metrics ---")
-            tcl.append("create_clock -period %f [get_ports ap_clk]" % self.clk_ns)
+            tcl.extend(_pnr_clock_constraint_cmds(self.clk_ns, self.clock2x_is_external))
+            place_directive = os.environ.get("FINN_VIVADO_PLACE_DIRECTIVE", "")
+            route_directive = os.environ.get("FINN_VIVADO_ROUTE_DIRECTIVE", "")
+            phys_opt_directive = os.environ.get(
+                "FINN_VIVADO_PHYS_OPT_DIRECTIVE", "AggressiveExplore"
+            )
+            post_route_phys_opt_directive = os.environ.get(
+                "FINN_VIVADO_POST_ROUTE_PHYS_OPT_DIRECTIVE", phys_opt_directive
+            )
             tcl.append("opt_design")
-            tcl.append("place_design")
-            tcl.append("route_design")
+            tcl.append(_vivado_directive_cmd("place_design", place_directive))
+            tcl.append(_vivado_directive_cmd("phys_opt_design", phys_opt_directive))
+            tcl.append(_vivado_directive_cmd("route_design", route_directive))
+            tcl.append(
+                _vivado_directive_cmd("phys_opt_design", post_route_phys_opt_directive)
+            )
             tcl.append("")
             tcl.append("# Write reports to files for Python-side parsing")
             util_rpt_file = "%s/ooc_utilization.rpt" % vivado_stitch_proj_dir
             timing_rpt_file = "%s/ooc_timing.rpt" % vivado_stitch_proj_dir
+            route_rpt_file = "%s/ooc_route_status.rpt" % vivado_stitch_proj_dir
             power_rpt_file = "%s/ooc_power.rpt" % vivado_stitch_proj_dir
             tcl.append('report_utilization -file "%s"' % util_rpt_file)
             tcl.append('report_timing_summary -file "%s"' % timing_rpt_file)
+            tcl.append('report_route_status -file "%s"' % route_rpt_file)
             tcl.append('report_power -file "%s"' % power_rpt_file)
             tcl.append("")
             tcl.append("# Write metadata (clock period, Vivado version) to a simple file")
@@ -577,6 +816,11 @@ class CreateStitchedIP(Transformation):
         if self.aximm_weight_files:
             model.set_metadata_prop(
                 "vivado_stitch_aximm_weights", json.dumps(self.aximm_weight_files)
+            )
+        if self.finnloop_aximm_name_map:
+            model.set_metadata_prop(
+                "vivado_stitch_finnloop_aximm_map",
+                json.dumps(self.finnloop_aximm_name_map),
             )
         tcl.append(
             (
@@ -749,6 +993,8 @@ close $ofile
         tcl.append("foreach vf $all_v_files {puts $fp $vf}")
         tcl.append("close $fp")
         # write the project creator tcl script
+        tcl = _batch_simple_add_files(tcl)
+        tcl = _drop_intermediate_save_bd_design(tcl)
         tcl_string = "\n".join(tcl) + "\n"
         with open(vivado_stitch_proj_dir + "/make_project.tcl", "w") as f:
             f.write(tcl_string)
@@ -760,9 +1006,23 @@ close $ofile
             f.write("cd {}\n".format(vivado_stitch_proj_dir))
             f.write("vivado -mode batch -source make_project.tcl\n")
             f.write("cd {}\n".format(working_dir))
+        pre_vivado_model = os.environ.get("FINN_PRE_VIVADO_STITCH_MODEL")
+        if pre_vivado_model:
+            pre_vivado_model_dir = os.path.dirname(pre_vivado_model)
+            if pre_vivado_model_dir:
+                os.makedirs(pre_vivado_model_dir, exist_ok=True)
+            model.set_metadata_prop("pre_vivado_stitch_model", pre_vivado_model)
+            model.save(pre_vivado_model)
         bash_command = ["bash", make_project_sh]
         process_compile = subprocess.Popen(bash_command, stdout=subprocess.PIPE)
         process_compile.communicate()
+        _check_vivado_stitch_outputs(
+            vivado_stitch_proj_dir,
+            block_name,
+            self.run_synth,
+            self.run_pnr,
+            process_compile.returncode,
+        )
         _append_nested_verilog_sources(model, v_file_list)
         # wrapper may be created in different location depending on Vivado version
         if not os.path.isfile(wrapper_filename):
@@ -787,6 +1047,7 @@ close $ofile
         self.s_axis_idx = 0
         self.clock_reset_are_external = False
         self.clock2x_is_external = False
+        self.finnloop_aximm_name_map = {}
         self.create_cmds = []
         self.connect_cmds = []
         self.intf_names = {

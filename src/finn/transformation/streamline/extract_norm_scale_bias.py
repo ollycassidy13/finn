@@ -25,8 +25,9 @@ class ExtractNormScaleBias(Transformation):
     """Extract LayerNormalization scale and bias into separate nodes
     and set initializers to 1 or 0 respectively."""
 
-    def __init__(self):
+    def __init__(self, cleanup=True):
         super().__init__()
+        self._cleanup = cleanup
 
     def apply(self, model):
         graph = model.graph
@@ -97,13 +98,14 @@ class ExtractNormScaleBias(Transformation):
                     ln_node.input[2] = new_bias_name
 
                 if extract_scale or extract_bias:
-                    # since we used append() for new nodes, need to call
-                    # SortGraph to ensure correct (topological) order
-                    model = model.transform(SortGraph())
-                    # Remove potential unity multiplications from alpha and beta attributes
-                    model = model.transform(RemoveIdentityOps())
-                    # Ensure unique parameter tensors
-                    model = model.transform(GiveUniqueParameterTensors())
+                    if self._cleanup:
+                        # since we used append() for new nodes, need to call
+                        # SortGraph to ensure correct (topological) order
+                        model = model.transform(SortGraph())
+                        # Remove potential unity multiplications from alpha and beta attributes
+                        model = model.transform(RemoveIdentityOps())
+                        # Ensure unique parameter tensors
+                        model = model.transform(GiveUniqueParameterTensors())
                     return model, True
 
         return model, False

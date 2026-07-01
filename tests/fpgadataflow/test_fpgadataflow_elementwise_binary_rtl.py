@@ -3,6 +3,8 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+from pathlib import Path
+
 import pytest
 
 import numpy as np
@@ -285,7 +287,7 @@ def test_elementwise_rtl_backend_selection(
 
 @pytest.mark.fpgadataflow
 def test_elementwise_rtl_broadcast_const_memstream_length(tmp_path):
-    """Broadcast constants should tile to output cycles, not output*const cycles."""
+    """Broadcast constants should be stored compactly and replayed by MLO taps."""
 
     model = create_elementwise_model(
         "ElementwiseMul",
@@ -309,13 +311,100 @@ def test_elementwise_rtl_broadcast_const_memstream_length(tmp_path):
 
     node_inst = getCustomOp(model.graph.node[0])
     assert model.graph.node[0].op_type == "ElementwiseMul_rtl"
-    assert node_inst.calc_wmem() == 20
+    assert node_inst.calc_wmem() == 4
+    assert node_inst.calc_wmem_reps() == 5
 
     node_inst.set_nodeattr("code_gen_dir_ipgen", str(tmp_path))
     node_inst.generate_params(model, str(tmp_path))
 
-    assert len((tmp_path / "input_1.npy").read_text().splitlines()) == 4
-    assert len((tmp_path / "memblock.dat").read_text().splitlines()) == 20
+    weights = np.load(tmp_path / "input_1.npy")
+    assert weights.shape == (1, 4, 1)
+    assert len((tmp_path / "memblock.dat").read_text().splitlines()) == 4
+
+
+@pytest.mark.fpgadataflow
+def test_elementwise_rtl_const_memstream_ties_unused_selector(tmp_path):
+    model = create_elementwise_model(
+        "ElementwiseAdd",
+        "FLOAT32",
+        "FLOAT32",
+        lhs_shape=[1, 4],
+        rhs_shape=[1, 4],
+    )
+    model.set_initializer("in_y", np.ones((1, 4), dtype=np.float32))
+
+    model = model.transform(InferDataTypes())
+    model = model.transform(InferShapes())
+    model = model.transform(InferElementwiseBinaryOperation())
+
+    node_inst = getCustomOp(model.graph.node[0])
+    node_inst.set_nodeattr("PE", 1)
+
+    model = model.transform(InferDataTypes())
+    model = model.transform(InferShapes())
+    model = model.transform(SpecializeLayers(VERSAL_PART))
+    model = model.transform(MinimizeAccumulatorWidth())
+
+    node = model.graph.node[0]
+    node.name = "ElementwiseAdd_rtl_0"
+    node_inst = getCustomOp(node)
+    node_inst.set_nodeattr("code_gen_dir_ipgen", str(tmp_path))
+    node_inst.set_nodeattr("gen_top_module", node.name)
+    (tmp_path / f"{node.name}.v").write_text("")
+    (tmp_path / f"{node.name}_memstream_wrapper.v").write_text("")
+
+    ipi_cmd = "\n".join(node_inst.code_generation_ipi())
+
+    assert "xlconstant:1.1" in ipi_cmd
+    assert "ElementwiseAdd_rtl_0_wstrm_selector_zero" in ipi_cmd
+    assert "s_axis_0_tvalid" in ipi_cmd
+    assert "s_axis_0_tdata" in ipi_cmd
+
+
+@pytest.mark.fpgadataflow
+def test_fetch_weights_wrapper_aximm_annotations_are_well_formed():
+    repo_root = Path(__file__).resolve().parents[2]
+    wrapper = repo_root / "finn-rtllib/fetch_weights/fetch_weights_wrapper.v"
+    text = wrapper.read_text()
+
+    assert 'X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm"' not in text
+    for signal in ["ARADDR", "ARVALID", "RDATA", "RREADY", "AWADDR", "WDATA", "BREADY"]:
+        assert f"xilinx.com:interface:aximm:1.0 axi_mm {signal}" in text
+
+
+@pytest.mark.fpgadataflow
+def test_fetch_weights_direct_streams_when_widths_match():
+    repo_root = Path(__file__).resolve().parents[2]
+    fetch_weights = repo_root / "finn-rtllib/fetch_weights/fetch_weights.sv"
+    text = fetch_weights.read_text()
+
+    assert "IWSIMD = (TH > 1) ? ((PE*SIMD)/TH) : (PE*SIMD)" in text
+    assert "USE_LOCAL_WEIGHT_BUFFER = (TH == 1) && (DS_BITS_BA != WS_BITS_BA)" in text
+    assert "DMA_N_REPS = USE_LOCAL_WEIGHT_BUFFER ? 1 : N_REPS" in text
+    assert "if(DMA_N_REPS > 1) begin" in text
+    assert "if(USE_LOCAL_WEIGHT_BUFFER) begin" in text
+    assert "assign axis_lwb_tdata  = axis_dwc_tdata" in text
+
+
+@pytest.mark.fpgadataflow
+def test_fetch_weights_ram_style_is_threaded_to_local_buffer():
+    repo_root = Path(__file__).resolve().parents[2]
+    fetch_weights = (repo_root / "finn-rtllib/fetch_weights/fetch_weights.sv").read_text()
+    local_weight_buffer = (
+        repo_root / "finn-rtllib/fetch_weights/local_weight_buffer.sv"
+    ).read_text()
+    wrapper = (repo_root / "finn-rtllib/fetch_weights/fetch_weights_wrapper.v").read_text()
+    hwcustomop = (repo_root / "src/finn/custom_op/fpgadataflow/hwcustomop.py").read_text()
+
+    assert "parameter                 RAM_STYLE = \"block\"" in fetch_weights
+    assert "parameter                 RAM_STYLE = \"block\"" in local_weight_buffer
+    assert "parameter   RAM_STYLE = $RAM_STYLE$" in wrapper
+    assert ".RAM_STYLE(RAM_STYLE)" in fetch_weights
+    assert ".RAM_STYLE(RAM_STYLE)" in local_weight_buffer
+    assert ".RAM_STYLE(RAM_STYLE)" in wrapper
+    assert ".RAM_STYLE(\"block\")" not in local_weight_buffer
+    assert 'ram_style = \'"{}"\'.format(self.get_nodeattr("ram_style"))' in hwcustomop
+    assert '"$RAM_STYLE$": [ram_style]' in hwcustomop
 
 
 @pytest.mark.fpgadataflow

@@ -34,6 +34,7 @@ from finn.custom_op.fpgadataflow.rtl.addclstoken_rtl import AddCLSToken_rtl
 from finn.custom_op.fpgadataflow.rtl.convolutioninputgenerator_rtl import (
     ConvolutionInputGenerator_rtl,
 )
+from finn.custom_op.fpgadataflow.rtl.duplicatestreams_rtl import DuplicateStreams_rtl
 from finn.custom_op.fpgadataflow.rtl.elementwise_binary_rtl import (
     ElementwiseAdd_rtl,
     ElementwiseMul_rtl,

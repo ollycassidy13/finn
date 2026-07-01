@@ -129,13 +129,14 @@ if (M_BYTE_LANES == S_BYTE_LANES) begin : bypass
 end else if (M_BYTE_LANES > S_BYTE_LANES) begin : upsize
     // output is wider; upsize
 
-    // required number of segments in wider bus
-    localparam SEG_COUNT = M_BYTE_LANES / S_BYTE_LANES;
-    // data width and keep width per segment
-    localparam SEG_DATA_WIDTH = M_DATA_WIDTH / SEG_COUNT;
-    localparam SEG_KEEP_WIDTH = M_BYTE_LANES / SEG_COUNT;
+    // required number of input-width segments in wider bus
+    localparam SEG_COUNT = (M_BYTE_LANES + S_BYTE_LANES - 1) / S_BYTE_LANES;
+    localparam PADDED_DATA_WIDTH = SEG_COUNT * S_DATA_WIDTH;
+    localparam PADDED_KEEP_WIDTH = SEG_COUNT * S_KEEP_WIDTH;
 
-    reg [$clog2(SEG_COUNT)-1:0] seg_reg = 0;
+    // Keep segment selection one-hot so a wide upsize does not synthesize one
+    // binary selector bit into thousands of mux inputs.
+    (* max_fanout = 64 *) reg [SEG_COUNT-1:0] seg_sel_reg = {{(SEG_COUNT-1){1'b0}}, 1'b1};
 
     reg [S_DATA_WIDTH-1:0] s_axis_tdata_reg = {S_DATA_WIDTH{1'b0}};
     reg [S_KEEP_WIDTH-1:0] s_axis_tkeep_reg = {S_KEEP_WIDTH{1'b0}};
@@ -145,8 +146,8 @@ end else if (M_BYTE_LANES > S_BYTE_LANES) begin : upsize
     reg [DEST_WIDTH-1:0] s_axis_tdest_reg = {DEST_WIDTH{1'b0}};
     reg [USER_WIDTH-1:0] s_axis_tuser_reg = {USER_WIDTH{1'b0}};
 
-    reg [M_DATA_WIDTH-1:0] m_axis_tdata_reg = {M_DATA_WIDTH{1'b0}};
-    reg [M_KEEP_WIDTH-1:0] m_axis_tkeep_reg = {M_KEEP_WIDTH{1'b0}};
+    reg [PADDED_DATA_WIDTH-1:0] m_axis_tdata_padded_reg = {PADDED_DATA_WIDTH{1'b0}};
+    reg [PADDED_KEEP_WIDTH-1:0] m_axis_tkeep_padded_reg = {PADDED_KEEP_WIDTH{1'b0}};
     reg m_axis_tvalid_reg = 1'b0;
     reg m_axis_tlast_reg = 1'b0;
     reg [ID_WIDTH-1:0] m_axis_tid_reg = {ID_WIDTH{1'b0}};
@@ -155,49 +156,72 @@ end else if (M_BYTE_LANES > S_BYTE_LANES) begin : upsize
 
     assign s_axis_tready = !s_axis_tvalid_reg;
 
-    assign m_axis_tdata  = m_axis_tdata_reg;
-    assign m_axis_tkeep  = M_KEEP_ENABLE ? m_axis_tkeep_reg : {M_KEEP_WIDTH{1'b1}};
+    assign m_axis_tdata  = m_axis_tdata_padded_reg[M_DATA_WIDTH-1:0];
+    assign m_axis_tkeep  = M_KEEP_ENABLE ? m_axis_tkeep_padded_reg[M_KEEP_WIDTH-1:0] : {M_KEEP_WIDTH{1'b1}};
     assign m_axis_tvalid = m_axis_tvalid_reg;
     assign m_axis_tlast  = m_axis_tlast_reg;
     assign m_axis_tid    = ID_ENABLE   ? m_axis_tid_reg   : {ID_WIDTH{1'b0}};
     assign m_axis_tdest  = DEST_ENABLE ? m_axis_tdest_reg : {DEST_WIDTH{1'b0}};
     assign m_axis_tuser  = USER_ENABLE ? m_axis_tuser_reg : {USER_WIDTH{1'b0}};
 
+    wire output_ready = !m_axis_tvalid_reg || m_axis_tready;
+    wire input_valid = s_axis_tvalid_reg || s_axis_tvalid;
+    wire [S_DATA_WIDTH-1:0] input_tdata = s_axis_tvalid_reg ? s_axis_tdata_reg : s_axis_tdata;
+    wire [S_KEEP_WIDTH-1:0] input_tkeep = s_axis_tvalid_reg ? s_axis_tkeep_reg : s_axis_tkeep_int;
+    wire input_tlast = s_axis_tvalid_reg ? s_axis_tlast_reg : s_axis_tlast;
+    wire [ID_WIDTH-1:0] input_tid = s_axis_tvalid_reg ? s_axis_tid_reg : s_axis_tid;
+    wire [DEST_WIDTH-1:0] input_tdest = s_axis_tvalid_reg ? s_axis_tdest_reg : s_axis_tdest;
+    wire [USER_WIDTH-1:0] input_tuser = s_axis_tvalid_reg ? s_axis_tuser_reg : s_axis_tuser;
+    wire write_segment = output_ready && input_valid;
+    wire complete_word = input_tlast || seg_sel_reg[SEG_COUNT-1];
+
+    genvar upsize_seg;
+    for (upsize_seg = 0; upsize_seg < SEG_COUNT; upsize_seg = upsize_seg + 1) begin : gen_upsize_segment
+        always @(posedge clk) begin
+            if (write_segment && seg_sel_reg[upsize_seg]) begin
+                m_axis_tdata_padded_reg[upsize_seg*S_DATA_WIDTH +: S_DATA_WIDTH] <= input_tdata;
+            end
+        end
+
+        if (upsize_seg == 0) begin : gen_first_keep
+            always @(posedge clk) begin
+                if (write_segment && seg_sel_reg[upsize_seg]) begin
+                    m_axis_tkeep_padded_reg[upsize_seg*S_KEEP_WIDTH +: S_KEEP_WIDTH] <= input_tkeep;
+                end
+            end
+        end else begin : gen_upper_keep
+            always @(posedge clk) begin
+                if (write_segment && seg_sel_reg[upsize_seg]) begin
+                    m_axis_tkeep_padded_reg[upsize_seg*S_KEEP_WIDTH +: S_KEEP_WIDTH] <= input_tkeep;
+                end else if (write_segment && seg_sel_reg[0]) begin
+                    m_axis_tkeep_padded_reg[upsize_seg*S_KEEP_WIDTH +: S_KEEP_WIDTH] <= {S_KEEP_WIDTH{1'b0}};
+                end
+            end
+        end
+    end
+
     always @(posedge clk) begin
         m_axis_tvalid_reg <= m_axis_tvalid_reg && !m_axis_tready;
 
-        if (!m_axis_tvalid_reg || m_axis_tready) begin
+        if (output_ready) begin
             // output register empty
 
-            if (seg_reg == 0) begin
-                m_axis_tdata_reg[seg_reg*SEG_DATA_WIDTH +: SEG_DATA_WIDTH] <= s_axis_tvalid_reg ? s_axis_tdata_reg : s_axis_tdata;
-                m_axis_tkeep_reg <= s_axis_tvalid_reg ? s_axis_tkeep_reg : s_axis_tkeep_int;
-            end else begin
-                m_axis_tdata_reg[seg_reg*SEG_DATA_WIDTH +: SEG_DATA_WIDTH] <= s_axis_tdata;
-                m_axis_tkeep_reg[seg_reg*SEG_KEEP_WIDTH +: SEG_KEEP_WIDTH] <= s_axis_tkeep_int;
-            end
-            m_axis_tlast_reg <= s_axis_tvalid_reg ? s_axis_tlast_reg : s_axis_tlast;
-            m_axis_tid_reg <= s_axis_tvalid_reg ? s_axis_tid_reg : s_axis_tid;
-            m_axis_tdest_reg <= s_axis_tvalid_reg ? s_axis_tdest_reg : s_axis_tdest;
-            m_axis_tuser_reg <= s_axis_tvalid_reg ? s_axis_tuser_reg : s_axis_tuser;
+            if (input_valid) begin
+                m_axis_tlast_reg <= input_tlast;
+                m_axis_tid_reg <= input_tid;
+                m_axis_tdest_reg <= input_tdest;
+                m_axis_tuser_reg <= input_tuser;
 
-            if (s_axis_tvalid_reg) begin
-                // consume data from buffer
-                s_axis_tvalid_reg <= 1'b0;
-
-                if (s_axis_tlast_reg || seg_reg == SEG_COUNT-1) begin
-                    seg_reg <= 0;
-                    m_axis_tvalid_reg <= 1'b1;
-                end else begin
-                    seg_reg <= seg_reg + 1;
+                if (s_axis_tvalid_reg) begin
+                    // consume data from buffer
+                    s_axis_tvalid_reg <= 1'b0;
                 end
-            end else if (s_axis_tvalid) begin
-                // data direct from input
-                if (s_axis_tlast || seg_reg == SEG_COUNT-1) begin
-                    seg_reg <= 0;
+
+                if (complete_word) begin
+                    seg_sel_reg <= {{(SEG_COUNT-1){1'b0}}, 1'b1};
                     m_axis_tvalid_reg <= 1'b1;
                 end else begin
-                    seg_reg <= seg_reg + 1;
+                    seg_sel_reg <= {seg_sel_reg[SEG_COUNT-2:0], 1'b0};
                 end
             end
         end else if (s_axis_tvalid && s_axis_tready) begin
@@ -212,7 +236,7 @@ end else if (M_BYTE_LANES > S_BYTE_LANES) begin : upsize
         end
 
         if (rst) begin
-            seg_reg <= 0;
+            seg_sel_reg <= {{(SEG_COUNT-1){1'b0}}, 1'b1};
             s_axis_tvalid_reg <= 1'b0;
             m_axis_tvalid_reg <= 1'b0;
         end

@@ -45,6 +45,7 @@ class SelectToken(HWCustomOp):
             {
                 "NumTokens": ("i", True, 0),
                 "NumChannels": ("i", True, 0),
+                "BatchSize": ("i", False, 1),
                 "TokenIndex": ("i", True, 0),
                 "SIMD": ("i", False, 1),
                 "inputDataType": ("s", True, ""),
@@ -56,7 +57,11 @@ class SelectToken(HWCustomOp):
     def get_normal_input_shape(self, ind=0):
         if ind != 0:
             raise Exception("SelectToken only has one input")
-        return (1, self.get_nodeattr("NumTokens"), self.get_nodeattr("NumChannels"))
+        return (
+            self.get_nodeattr("BatchSize"),
+            self.get_nodeattr("NumTokens"),
+            self.get_nodeattr("NumChannels"),
+        )
 
     def get_folded_input_shape(self, ind=0):
         normal_shape = self.get_normal_input_shape(ind)
@@ -66,7 +71,7 @@ class SelectToken(HWCustomOp):
         return normal_shape[:-1] + (num_channels // simd, simd)
 
     def get_normal_output_shape(self, ind=0):
-        return (1, self.get_nodeattr("NumChannels"))
+        return (self.get_nodeattr("BatchSize"), self.get_nodeattr("NumChannels"))
 
     def get_folded_output_shape(self, ind=0):
         normal_shape = self.get_normal_output_shape(ind)

@@ -243,6 +243,7 @@ class InferThresholdingLayer(Transformation):
                     domain="finn.custom_op.fpgadataflow",
                     backend="fpgadataflow",
                     NumChannels=ifc,
+                    numThresholdChannels=int(thl_thres_shape[0]),
                     PE=pe,
                     numSteps=thl_thres_shape[1],
                     inputDataType=idt.name,
@@ -870,57 +871,67 @@ class InferDuplicateStreamsLayer(Transformation):
         if successors is not None and len(successors) >= 2:
             output_tensor = graph.input[0].name
             n_outputs = len(successors)
-
-            # create clone tensors
             out_shape = model.get_tensor_shape(output_tensor)
-            out_tensor_clones = []
-            for i in range(n_outputs):
-                clone = helper.make_tensor_value_info(
-                    model.make_new_valueinfo_name(), TensorProto.FLOAT, out_shape
+            if (
+                dt is None
+                or out_shape is None
+                or len(out_shape) == 0
+                or not _shape_is_hw_static(out_shape)
+            ):
+                successors = None
+            else:
+
+                # create clone tensors
+                out_tensor_clones = []
+                for i in range(n_outputs):
+                    clone = helper.make_tensor_value_info(
+                        model.make_new_valueinfo_name(), TensorProto.FLOAT, out_shape
+                    )
+                    model.graph.value_info.append(clone)
+                    out_tensor_clones += [clone.name]
+
+                num_ch = int(out_shape[-1])
+                vecs = out_shape[:-1] or [1]
+
+                # create node with no parallelization first
+                pe = 1
+
+                dup_node = helper.make_node(
+                    "DuplicateStreams",
+                    [output_tensor],
+                    out_tensor_clones,
+                    domain="finn.custom_op.fpgadataflow",
+                    backend="fpgadataflow",
+                    NumChannels=num_ch,
+                    PE=pe,
+                    inputDataType=dt.name,
+                    numInputVectors=vecs,
+                    NumOutputStreams=n_outputs,
+                    outFIFODepths=[2] * n_outputs,
+                    name="DuplicateStreams_" + output_tensor,
+                    cpp_interface="hls_vector",
+                    hls_style="freerunning",
                 )
-                model.graph.value_info.append(clone)
-                out_tensor_clones += [clone.name]
 
-            num_ch = int(out_shape[-1])
-            vecs = out_shape[:-1]
+                # take metadata from first node in graph
+                if hasattr(model.find_consumer(output_tensor), "metadata_props"):
+                    dup_node.metadata_props.extend(
+                        model.find_consumer(output_tensor).metadata_props
+                    )
+                graph.node.insert(0, dup_node)
 
-            # create node with no parallelization first
-            pe = 1
-
-            dup_node = helper.make_node(
-                "DuplicateStreams",
-                [output_tensor],
-                out_tensor_clones,
-                domain="finn.custom_op.fpgadataflow",
-                backend="fpgadataflow",
-                NumChannels=num_ch,
-                PE=pe,
-                inputDataType=dt.name,
-                numInputVectors=vecs,
-                NumOutputStreams=n_outputs,
-                outFIFODepths=[2] * n_outputs,
-                name="DuplicateStreams_" + output_tensor,
-                cpp_interface="hls_vector",
-                hls_style="freerunning",
-            )
-
-            # take metadata from first node in graph
-            if hasattr(model.find_consumer(output_tensor), "metadata_props"):
-                dup_node.metadata_props.extend(model.find_consumer(output_tensor).metadata_props)
-            graph.node.insert(0, dup_node)
-
-            # connect successors to out tensor clone
-            clone_idx = 0
-            for successor in successors:
-                for i, succ_input in enumerate(successor.input):
-                    if succ_input == output_tensor:
-                        successor.input[i] = out_tensor_clones[clone_idx]
-                        clone_idx += 1
-                        # if one node has multiple connections to the same output
-                        # find_direct_successors will return one node per input
-                        # so break the inner loop will result in correct behaviour
-                        break
-            graph_modified = True
+                # connect successors to out tensor clone
+                clone_idx = 0
+                for successor in successors:
+                    for i, succ_input in enumerate(successor.input):
+                        if succ_input == output_tensor:
+                            successor.input[i] = out_tensor_clones[clone_idx]
+                            clone_idx += 1
+                            # if one node has multiple connections to the same output
+                            # find_direct_successors will return one node per input
+                            # so break the inner loop will result in correct behaviour
+                            break
+                graph_modified = True
 
         for node in graph.node:
             node_ind += 1
@@ -937,6 +948,13 @@ class InferDuplicateStreamsLayer(Transformation):
                     dt = model.get_tensor_datatype(output_tensor)
                     # create clone tensors
                     out_shape = model.get_tensor_shape(output_tensor)
+                    if (
+                        dt is None
+                        or out_shape is None
+                        or len(out_shape) == 0
+                        or not _shape_is_hw_static(out_shape)
+                    ):
+                        continue
                     out_tensor_clones = []
                     for i in range(n_outputs):
                         clone = helper.make_tensor_value_info(
@@ -952,7 +970,7 @@ class InferDuplicateStreamsLayer(Transformation):
                         out_tensor_clones += [clone.name]
 
                     num_ch = int(out_shape[-1])
-                    vecs = out_shape[:-1]
+                    vecs = out_shape[:-1] or [1]
 
                     # create node with no parallelization first
                     pe = 1
@@ -1534,8 +1552,6 @@ class InferSelectTokenLayer(Transformation):
             exp_oshape = [int(seq_shape[0]), int(seq_shape[2])]
             if out_shape is not None and list(out_shape) != exp_oshape:
                 continue
-            if seq_shape[0] != 1:
-                continue
 
             idt = model.get_tensor_datatype(seq_name)
             if idt is None or (
@@ -1557,6 +1573,7 @@ class InferSelectTokenLayer(Transformation):
                 name="SelectToken_" + node.name,
                 NumTokens=num_tokens,
                 NumChannels=int(seq_shape[2]),
+                BatchSize=int(seq_shape[0]),
                 TokenIndex=token_index,
                 SIMD=1,
                 inputDataType=idt.name,
@@ -2339,8 +2356,6 @@ class InferShuffle(Transformation):
                 new_in_tensor = None
                 new_out_tensor = None
 
-                perm = n.attribute[0]
-
                 new_in_tensor = n.input[0]
                 in_shape = model.get_tensor_shape(n.input[0])
                 in_reshaped = in_shape
@@ -2367,15 +2382,31 @@ class InferShuffle(Transformation):
                         out_reshaped = model.get_tensor_shape(new_out_tensor)
                         to_remove.append(consumer)
 
-                # Handle None shapes (shape inference might have failed)
-                assert (
-                    in_reshaped is not None
-                ), f"""Could not infer shape for tensor {n.input[0]}.
-                    Please run InferShapes first"""
-                assert (
-                    out_reshaped is not None
-                ), f"""Could not infer shape for tensor {new_out_tensor}.
-                    Please run InferShapes first"""
+                # Skip dynamic or malformed shape transposes; they are not
+                # directly representable as static streaming shuffles.
+                if (
+                    in_shape is None
+                    or out_shape is None
+                    or in_reshaped is None
+                    or out_reshaped is None
+                    or len(in_shape) == 0
+                    or len(out_shape) == 0
+                    or len(in_reshaped) == 0
+                    or len(out_reshaped) == 0
+                    or not _shape_is_hw_static(in_shape)
+                    or not _shape_is_hw_static(out_shape)
+                    or not _shape_is_hw_static(in_reshaped)
+                    or not _shape_is_hw_static(out_reshaped)
+                ):
+                    continue
+
+                if len(n.attribute) > 0:
+                    perm = n.attribute[0]
+                else:
+                    perm = helper.make_attribute(
+                        "perm", list(reversed(range(len(in_reshaped))))
+                    )
+                perm_values = list(perm.ints)
 
                 idt = model.get_tensor_datatype(new_in_tensor)
                 odt = model.get_tensor_datatype(new_out_tensor)
@@ -2389,18 +2420,18 @@ class InferShuffle(Transformation):
                     """
                     )
 
-                if len(perm.ints) != len(in_reshaped):
+                if len(perm_values) != len(in_reshaped):
                     raise RuntimeError(
                         f"""
-                    Permutation list {perm.ints=} does not match the reshaped input dimension
+                    Permutation list {perm_values=} does not match the reshaped input dimension
                     {in_reshaped=}
                     """
                     )
 
-                if len(perm.ints) != len(out_shape):
+                if len(perm_values) != len(out_shape):
                     raise RuntimeError(
                         f"""
-                    Permutation list {perm.ints=} does not match the reshaped out dimension
+                    Permutation list {perm_values=} does not match the reshaped out dimension
                     {out_reshaped=}
                     """
                     )
@@ -2450,6 +2481,10 @@ def lift_to_rank1(name: str, model: ModelWrapper):
             model.set_initializer(name, tensor.reshape(1))
 
 
+def _shape_is_hw_static(shape):
+    return shape is not None and all(isinstance(dim, int) and dim > 0 for dim in shape)
+
+
 # Converts supported elementwise binary operations to their FINN custom
 # operation
 class InferElementwiseBinaryOperation(Transformation):
@@ -2468,11 +2503,12 @@ class InferElementwiseBinaryOperation(Transformation):
         return True
 
     # Initializes the transformation method with an optional filter function
-    def __init__(self, _filter=None):
+    def __init__(self, _filter=None, batch=False):
         # Initialize the base class Transformation object
         super().__init__()
         # Register the filter function as attribute
         self._filter = _filter if _filter is not None else lambda *_: True
+        self.batch = batch
 
     # Applies the transform to a whole model graph
     def apply(self, model: ModelWrapper):  # noqa
@@ -2490,6 +2526,14 @@ class InferElementwiseBinaryOperation(Transformation):
             if f"Elementwise{node.op_type}" in dir(elementwise_binary):
                 in0 = node.input[0]
                 in1 = node.input[1]
+                result = node.output[0]
+                if not all(
+                    _shape_is_hw_static(model.get_tensor_shape(tensor))
+                    for tensor in (in0, in1, result)
+                ):
+                    continue
+                if any(model.get_tensor_datatype(tensor) is None for tensor in (in0, in1, result)):
+                    continue
                 # if both inputs are constant, throw an error and
                 # ask user to run FoldConstants transform first
                 assert (
@@ -2504,8 +2548,6 @@ class InferElementwiseBinaryOperation(Transformation):
                     rhs_style = "input"
                 else:
                     rhs_style = "const"
-                result = node.output[0]
-
                 # Need to "lift" potential scalar inputs to rank-1 tensors
                 lift_to_rank1(in0, model)
                 lift_to_rank1(in1, model)
@@ -2588,10 +2630,11 @@ class InferElementwiseBinaryOperation(Transformation):
                 # Consider the graph to be modified, triggering exhaustive
                 # re-application of this transformation
                 graph_modified = True
-                # Exiting here triggers type and shape inference and cleanup
-                # after each transformed node. This helps QONNX to behave
-                # better / more consistent in certain cases...
-                break
+                if not self.batch:
+                    # Exiting here triggers type and shape inference and cleanup
+                    # after each transformed node. This helps QONNX to behave
+                    # better / more consistent in certain cases...
+                    break
         # Re-do shape and data type annotations after potential changes to the
         # model graph
         model = model.transform(InferShapes())

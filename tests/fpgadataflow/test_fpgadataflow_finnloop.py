@@ -4,6 +4,8 @@ import glob
 import numpy as np
 import os
 import re
+import shutil
+import subprocess
 from dataclasses import replace
 from onnx import TensorProto, helper
 from qonnx.core.datatype import DataType
@@ -22,6 +24,7 @@ from qonnx.util.basic import gen_finn_dt_tensor, get_by_name, qonnx_make_model
 import finn.builder.build_dataflow as build
 import finn.builder.build_dataflow_config as build_cfg
 import finn.core.onnx_exec as oxe
+from finn.custom_op.fpgadataflow.rtl.finn_loop import _bd_clock_freq_hz_cmds
 from finn.core.rtlsim_exec import rtlsim_exec
 from finn.transformation.fpgadataflow.compile_cppsim import CompileCppSim
 from finn.transformation.fpgadataflow.create_stitched_ip import CreateStitchedIP
@@ -58,6 +61,402 @@ verif_steps = [
 
 fpga_part = "xcvc1902-vsva2197-2MP-e-S"
 clk_ns = 5
+
+
+def test_finnloop_bd_clock_freq_hz_cmds():
+    cmds = _bd_clock_freq_hz_cmds(10.0 / 3.0, has_clk2x=True)
+    assert "set_property CONFIG.FREQ_HZ 300000000 [get_bd_ports /ap_clk]" in cmds
+    assert "set_property CONFIG.FREQ_HZ 600000000 [get_bd_ports /ap_clk2x]" in cmds
+
+    cmds = _bd_clock_freq_hz_cmds(5.0, has_clk2x=False)
+    assert cmds == ["set_property CONFIG.FREQ_HZ 200000000 [get_bd_ports /ap_clk]"]
+
+
+def test_finnloop_overlapped_scheduler_estimate_is_artifact_guarded(tmp_path):
+    body = helper.make_graph([], "empty_loop_body", [], [])
+    loop_node = helper.make_node(
+        "FINNLoop",
+        ["in0"],
+        ["out0"],
+        domain="finn.custom_op.fpgadataflow.rtl",
+        backend="fpgadataflow",
+        body=body,
+        iteration=3,
+        inputDataType="INT8",
+        outputDataType="INT8",
+        name="FINNLoop_0",
+    )
+    loop_inst = getCustomOp(loop_node)
+
+    assert loop_inst.get_nodeattr("loop_scheduler_mode") == "sequential"
+    assert loop_inst.get_nodeattr("overlapped_scheduler_dcp_ready") == 0
+    assert loop_inst._overlapped_exp_cycles() is None
+
+    loop_inst.set_nodeattr("loop_scheduler_mode", "overlapped")
+    loop_inst.set_nodeattr("overlapped_body_ii_cycles", 7)
+    with pytest.raises(RuntimeError, match="existing graph/RTL artifact"):
+        loop_inst.get_exp_cycles()
+
+    non_rtl_artifact = tmp_path / "scheduler.json"
+    non_rtl_artifact.write_text("{}\n")
+    loop_inst.set_nodeattr("overlapped_scheduler_artifact", str(non_rtl_artifact))
+    with pytest.raises(RuntimeError, match="existing graph/RTL artifact"):
+        loop_inst.get_exp_cycles()
+
+    rtl_artifact = tmp_path / "scheduler.sv"
+    rtl_artifact.write_text("module scheduler; endmodule\n")
+    loop_inst.set_nodeattr("overlapped_scheduler_artifact", str(rtl_artifact))
+
+    assert loop_inst.get_exp_cycles() == (7 + 40) * 3
+
+    with pytest.raises(RuntimeError, match="overlapped_scheduler_dcp_ready=1"):
+        loop_inst._overlapped_scheduler_wrapper_source()
+
+
+def test_finnloop_overlapped_hdl_codegen_requires_real_wrapper(tmp_path):
+    body = helper.make_graph([], "empty_loop_body", [], [])
+    loop_node = helper.make_node(
+        "FINNLoop",
+        ["in0"],
+        ["out0"],
+        domain="finn.custom_op.fpgadataflow.rtl",
+        backend="fpgadataflow",
+        body=body,
+        iteration=3,
+        inputDataType="INT8",
+        outputDataType="INT8",
+        name="FINNLoop_0",
+    )
+    loop_inst = getCustomOp(loop_node)
+    loop_inst.set_nodeattr("code_gen_dir_ipgen", str(tmp_path / "codegen"))
+    loop_inst.set_nodeattr("loop_scheduler_mode", "overlapped")
+    loop_inst.set_nodeattr("overlapped_body_ii_cycles", 7)
+
+    contract = tmp_path / "contract.sv"
+    contract.write_text("module FINNLoop_0_overlapped_scheduler_contract; endmodule\n")
+    loop_inst.set_nodeattr("overlapped_scheduler_artifact", str(contract))
+    loop_inst.set_nodeattr("overlapped_scheduler_dcp_ready", 1)
+    with pytest.raises(RuntimeError, match="must define module FINNLoop_0_loop_cont_wrapper"):
+        loop_inst._overlapped_scheduler_wrapper_source()
+
+    wrapper = tmp_path / "wrapper.sv"
+    wrapper.write_text("module FINNLoop_0_loop_cont_wrapper; endmodule\n")
+    loop_inst.set_nodeattr("overlapped_scheduler_artifact", str(wrapper))
+
+    assert loop_inst._overlapped_scheduler_wrapper_source() == wrapper
+    assert loop_inst._write_overlapped_scheduler_wrapper() is True
+    generated = tmp_path / "codegen" / "FINNLoop_0_wrapper.sv"
+    assert generated.read_text() == wrapper.read_text()
+
+
+def test_finnloop_builtin_stream_feedback_codegen(tmp_path, monkeypatch):
+    monkeypatch.setenv("FINN_ROOT", os.getcwd())
+
+    inp = helper.make_tensor_value_info("loop_in", TensorProto.FLOAT, [1, 4])
+    outp = helper.make_tensor_value_info("loop_out", TensorProto.FLOAT, [1, 4])
+    body = helper.make_graph([], "empty_loop_body", [inp], [outp])
+    body_model = ModelWrapper(qonnx_make_model(body))
+    body_model.set_tensor_datatype("loop_in", DataType["INT8"])
+    body_model.set_tensor_datatype("loop_out", DataType["INT8"])
+    body_model.set_metadata_prop(
+        "vivado_stitch_ifnames",
+        str({"s_axis": [("s_axis_0", 8)], "aximm": [], "clk2x": ["ap_clk2x"]}),
+    )
+    body_model.set_metadata_prop("vivado_stitch_proj", str(tmp_path / "body_proj"))
+    body_model.set_metadata_prop("vivado_stitch_vlnv", "xilinx.com:finn:body:1.0")
+
+    loop_node = helper.make_node(
+        "FINNLoop",
+        ["in0"],
+        ["out0"],
+        domain="finn.custom_op.fpgadataflow.rtl",
+        backend="fpgadataflow",
+        body=body_model.graph,
+        iteration=3,
+        inputDataType="INT8",
+        outputDataType="INT8",
+        name="FINNLoop_0",
+    )
+    loop_inst = getCustomOp(loop_node)
+    codegen_dir = tmp_path / "codegen"
+    codegen_dir.mkdir()
+    loop_inst.set_nodeattr("code_gen_dir_ipgen", str(codegen_dir))
+    loop_inst.set_nodeattr("loop_scheduler_mode", "overlapped")
+    loop_inst.set_nodeattr("overlapped_body_ii_cycles", 7)
+    loop_inst.set_nodeattr("overlapped_scheduler_artifact", "stream_feedback")
+
+    with pytest.raises(RuntimeError, match="existing graph/RTL artifact"):
+        loop_inst.get_exp_cycles()
+    with pytest.raises(RuntimeError, match="overlapped_scheduler_dcp_ready=1"):
+        loop_inst._overlapped_scheduler_wrapper_source()
+
+    loop_inst.set_nodeattr("overlapped_scheduler_dcp_ready", 1)
+    assert loop_inst.get_exp_cycles() == (7 + 40) * 3
+    assert loop_inst._overlapped_scheduler_wrapper_source() is None
+
+    loop_inst.generate_hdl(body_model, fpga_part, clk_ns)
+    generated = (codegen_dir / "FINNLoop_0_wrapper.v").read_text()
+    assert "overlapped_loop_control #(" in generated
+    assert re.search(r"\n\s+loop_control #\(", generated) is None
+
+    ipgen_cmd = "\n".join(
+        loop_inst._intermediate_frame_dwc_ipgen_cmds()
+        + loop_inst._loop_shell_source_ipgen_cmds()
+    )
+    assert "-module_name if_dwc_feedback" in ipgen_cmd
+    assert "finn-rtllib/mlo/overlapped_loop_control.sv" in ipgen_cmd
+    assert "finn-rtllib/mlo/infrastructure/streamed_feedback_frames.sv" in ipgen_cmd
+    assert loop_inst.get_verilog_top_module_intf_names()["clk2x"] == ["ap_clk2x"]
+
+
+@pytest.mark.vivado
+def test_finnloop_stream_feedback_rtl_xsim(tmp_path):
+    if shutil.which("xvlog") is None or shutil.which("xelab") is None or shutil.which("xsim") is None:
+        pytest.skip("Vivado xsim tools are not on PATH")
+
+    repo_root = os.getcwd()
+    dwc_stub = tmp_path / "if_dwc_feedback_stub.sv"
+    dwc_stub.write_text(
+        """\
+module if_dwc_feedback (
+    input  logic       aclk,
+    input  logic       aresetn,
+    input  logic       s_axis_tvalid,
+    output logic       s_axis_tready,
+    input  logic [7:0] s_axis_tdata,
+    input  logic [0:0] s_axis_tkeep,
+    input  logic       s_axis_tlast,
+    output logic       m_axis_tvalid,
+    input  logic       m_axis_tready,
+    output logic [7:0] m_axis_tdata,
+    output logic [0:0] m_axis_tkeep,
+    output logic       m_axis_tlast
+);
+    assign s_axis_tready = m_axis_tready;
+    assign m_axis_tvalid = s_axis_tvalid;
+    assign m_axis_tdata = s_axis_tdata;
+    assign m_axis_tkeep = s_axis_tkeep;
+    assign m_axis_tlast = s_axis_tlast;
+endmodule
+"""
+    )
+    tb = tmp_path / "tb_streamed_feedback_frames.sv"
+    tb.write_text(
+        """\
+module tb_streamed_feedback_frames;
+    logic clk = 1'b0;
+    logic rstn = 1'b0;
+    always #5 clk = ~clk;
+
+    logic [7:0] s_idx_tdata;
+    logic s_idx_tvalid;
+    logic s_idx_tready;
+    logic [7:0] m_idx_tdata;
+    logic m_idx_tvalid;
+    logic m_idx_tready;
+
+    logic [7:0] s_axis_tdata;
+    logic s_axis_tvalid;
+    logic s_axis_tready;
+    logic [7:0] m_axis_tdata;
+    logic m_axis_tvalid;
+    logic m_axis_tready;
+
+    streamed_feedback_frames #(
+        .ILEN_BITS(8),
+        .OLEN_BITS(8),
+        .IDX_BITS(8),
+        .FM_SIZE(4),
+        .N_DCPL_STGS(0)
+    ) dut (
+        .aclk(clk),
+        .aresetn(rstn),
+        .s_idx_tdata(s_idx_tdata),
+        .s_idx_tvalid(s_idx_tvalid),
+        .s_idx_tready(s_idx_tready),
+        .m_idx_tdata(m_idx_tdata),
+        .m_idx_tvalid(m_idx_tvalid),
+        .m_idx_tready(m_idx_tready),
+        .s_axis_tdata(s_axis_tdata),
+        .s_axis_tvalid(s_axis_tvalid),
+        .s_axis_tready(s_axis_tready),
+        .m_axis_tdata(m_axis_tdata),
+        .m_axis_tvalid(m_axis_tvalid),
+        .m_axis_tready(m_axis_tready)
+    );
+
+    logic [31:0] unused_axi;
+    logic [7:0] unused_stream;
+    overlapped_loop_control #(
+        .FM_SIZE(4),
+        .N_LAYERS(3),
+        .ILEN_BITS(8),
+        .OLEN_BITS(8),
+        .IDX_BITS(8),
+        .ADDR_BITS(32),
+        .DATA_BITS(32),
+        .LEN_BITS(16)
+    ) shell_elab (
+        .aclk(clk),
+        .aresetn(rstn),
+        .m_axi_hbm_araddr(),
+        .m_axi_hbm_arburst(),
+        .m_axi_hbm_arcache(),
+        .m_axi_hbm_arid(),
+        .m_axi_hbm_arlen(),
+        .m_axi_hbm_arlock(),
+        .m_axi_hbm_arprot(),
+        .m_axi_hbm_arsize(),
+        .m_axi_hbm_arready(1'b1),
+        .m_axi_hbm_arvalid(),
+        .m_axi_hbm_awaddr(),
+        .m_axi_hbm_awburst(),
+        .m_axi_hbm_awcache(),
+        .m_axi_hbm_awid(),
+        .m_axi_hbm_awlen(),
+        .m_axi_hbm_awlock(),
+        .m_axi_hbm_awprot(),
+        .m_axi_hbm_awsize(),
+        .m_axi_hbm_awready(1'b1),
+        .m_axi_hbm_awvalid(),
+        .m_axi_hbm_rdata(32'h0),
+        .m_axi_hbm_rid(2'b0),
+        .m_axi_hbm_rlast(1'b0),
+        .m_axi_hbm_rresp(2'b0),
+        .m_axi_hbm_rready(),
+        .m_axi_hbm_rvalid(1'b0),
+        .m_axi_hbm_wdata(),
+        .m_axi_hbm_wlast(),
+        .m_axi_hbm_wstrb(),
+        .m_axi_hbm_wready(1'b1),
+        .m_axi_hbm_wvalid(),
+        .m_axi_hbm_bid(2'b0),
+        .m_axi_hbm_bresp(2'b0),
+        .m_axi_hbm_bready(),
+        .m_axi_hbm_bvalid(1'b0),
+        .m_axis_core_tdata(),
+        .m_axis_core_tvalid(),
+        .m_axis_core_tready(1'b1),
+        .s_axis_core_tdata(8'h0),
+        .s_axis_core_tvalid(1'b0),
+        .s_axis_core_tready(),
+        .m_idx_tdata(),
+        .m_idx_tvalid(),
+        .m_idx_tready(1'b1),
+        .s_idx_tdata(8'h0),
+        .s_idx_tvalid(1'b0),
+        .s_idx_tready(),
+        .s_axis_fs_tdata(8'h0),
+        .s_axis_fs_tvalid(1'b0),
+        .s_axis_fs_tready(),
+        .m_axis_se_tdata(),
+        .m_axis_se_tvalid(),
+        .m_axis_se_tready(1'b1)
+    );
+
+    task automatic send_idx(input logic [7:0] value);
+        s_idx_tdata = value;
+        s_idx_tvalid = 1'b1;
+        @(posedge clk);
+        while (!s_idx_tready) @(posedge clk);
+        s_idx_tvalid = 1'b0;
+    endtask
+
+    task automatic send_word(input logic [7:0] value);
+        s_axis_tdata = value;
+        s_axis_tvalid = 1'b1;
+        @(posedge clk);
+        while (!s_axis_tready) @(posedge clk);
+        s_axis_tvalid = 1'b0;
+    endtask
+
+    task automatic expect_idx(input logic [7:0] value);
+        @(posedge clk);
+        while (!m_idx_tvalid) @(posedge clk);
+        if (m_idx_tdata !== value) begin
+            $error("expected idx %0d, got %0d", value, m_idx_tdata);
+            $fatal;
+        end
+    endtask
+
+    task automatic expect_word(input logic [7:0] value);
+        @(posedge clk);
+        while (!m_axis_tvalid) @(posedge clk);
+        if (m_axis_tdata !== value) begin
+            $error("expected word %0d, got %0d", value, m_axis_tdata);
+            $fatal;
+        end
+    endtask
+
+    initial begin
+        s_idx_tdata = '0;
+        s_idx_tvalid = 1'b0;
+        m_idx_tready = 1'b1;
+        s_axis_tdata = '0;
+        s_axis_tvalid = 1'b0;
+        m_axis_tready = 1'b1;
+
+        repeat (4) @(posedge clk);
+        rstn = 1'b1;
+        repeat (2) @(posedge clk);
+
+        fork
+            send_idx(8'd4);
+            expect_idx(8'd5);
+        join
+
+        fork
+            begin
+                send_word(8'h10);
+                send_word(8'h11);
+                send_word(8'h12);
+                send_word(8'h13);
+            end
+            begin
+                expect_word(8'h10);
+                expect_word(8'h11);
+                expect_word(8'h12);
+                expect_word(8'h13);
+            end
+        join
+
+        repeat (4) @(posedge clk);
+        $display("PASS streamed_feedback_frames");
+        $finish;
+    end
+endmodule
+"""
+    )
+
+    sources = [
+        os.path.join(repo_root, "finn-rtllib/fifo/hdl/Q_srl.v"),
+        os.path.join(repo_root, "finn-rtllib/skid/skid.sv"),
+        os.path.join(repo_root, "finn-rtllib/mlo/infrastructure/mux.sv"),
+        os.path.join(repo_root, "finn-rtllib/mlo/infrastructure/demux.sv"),
+        str(dwc_stub),
+        os.path.join(repo_root, "finn-rtllib/mlo/infrastructure/streamed_feedback_frames.sv"),
+        os.path.join(repo_root, "finn-rtllib/mlo/overlapped_loop_control.sv"),
+        str(tb),
+    ]
+    run_env = os.environ.copy()
+    run_env.setdefault("XILINX_LOCAL_USER_DATA", "no")
+    for cmd in (
+        ["xvlog", "-sv", "-nolog", "-work", "work"] + sources,
+        ["xelab", "-nolog", "tb_streamed_feedback_frames", "-s", "tb_streamed_feedback_frames_sim"],
+        ["xsim", "-nolog", "tb_streamed_feedback_frames_sim", "-runall"],
+    ):
+        completed = subprocess.run(
+            cmd,
+            cwd=tmp_path,
+            env=run_env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stdout
+        if cmd[0] == "xsim":
+            assert "PASS streamed_feedback_frames" in completed.stdout
 
 
 def generate_random_threshold_values(data_type, num_input_channels, num_steps):

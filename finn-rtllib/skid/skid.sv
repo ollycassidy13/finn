@@ -40,13 +40,13 @@ module skid #(
 
 	uwire  aload;
 	uwire dat_t  adat;
-	uwire [3:0]  aptr;
+	(* max_fanout = 128 *) uwire [3:0]  aptr;
 	uwire  bvld;
 	uwire  bload;
 	if(FEED_STAGES == 0) begin : genNoFeedStages
 
 		// Elasticity Control Logic
-		logic [1:0]  AVld = '0;
+		(* max_fanout = 128 *) logic [1:0]  AVld = '0;
 		logic  ARdy = 1;	// = !AVld[1]
 		assign	irdy = ARdy;
 		assign	bvld = |AVld;
@@ -72,7 +72,7 @@ module skid #(
 		if(1) begin : blkInputFeed
 
 			// Credit-based Input Throttling
-			logic signed [$clog2(CAP):0]  ICnt = -CAP;  // -CAP, ..., -1, 0
+			(* max_fanout = 64 *) logic signed [$clog2(CAP):0]  ICnt = -CAP;  // -CAP, ..., -1, 0
 			assign	irdy = ICnt[$left(ICnt)];
 
 			// Dumb input stages to ease long-distance routing
@@ -112,7 +112,7 @@ module skid #(
 		end : blkInputFeed
 
 		// Elasticity Control Logic
-		logic signed [$clog2(CAP):0]  APtr = '1;  // -1, 0, 1, ..., CAP-1
+		(* max_fanout = 128 *) logic signed [$clog2(CAP):0]  APtr = '1;  // -1, 0, 1, ..., CAP-1
 		assign	bvld = !APtr[$left(APtr)];
 
 		always_ff @(posedge clk) begin
@@ -149,15 +149,25 @@ module skid #(
 		assign	bdat = SRL[aptr];
 	end : genBehav
 	else begin : genSRL
-		for(genvar  i = 0; i < DATA_WIDTH; i++) begin : genBit
-			SRL16E srl (
-				.CLK(clk),
-				.CE(aload),
-				.D(adat[i]),
-				.A3(aptr[3]), .A2(aptr[2]), .A1(aptr[1]), .A0(aptr[0]),
-				.Q(bdat[i])
+		localparam int unsigned  SRL_SLICE_BITS = 4096;
+		localparam int unsigned  SRL_SLICES =
+			(DATA_WIDTH + SRL_SLICE_BITS - 1) / SRL_SLICE_BITS;
+		for(genvar  c = 0; c < SRL_SLICES; c++) begin : genSlice
+			localparam int unsigned  SLICE_BASE = c * SRL_SLICE_BITS;
+			localparam int unsigned  SLICE_WIDTH =
+				(DATA_WIDTH - SLICE_BASE > SRL_SLICE_BITS)
+					? SRL_SLICE_BITS
+					: DATA_WIDTH - SLICE_BASE;
+			skid_srl_slice #(
+				.DATA_WIDTH(SLICE_WIDTH)
+			) srl_slice (
+				.clk(clk),
+				.ce(aload),
+				.din(adat[SLICE_BASE +: SLICE_WIDTH]),
+				.addr(aptr),
+				.dout(bdat[SLICE_BASE +: SLICE_WIDTH])
 			);
-		end : genBit
+		end : genSlice
 	end : genSRL
 
 	// Output Register
@@ -179,3 +189,41 @@ module skid #(
 	assign	ovld = BVld;
 
 endmodule : skid
+
+module skid_srl_slice #(
+	int unsigned  DATA_WIDTH
+)(
+	input	logic  clk,
+	input	logic  ce,
+	input	logic [DATA_WIDTH-1:0]  din,
+	input	logic [3:0]  addr,
+	output	uwire [DATA_WIDTH-1:0]  dout
+);
+
+	localparam int unsigned  APTR_BUFFER_FANOUT = 128;
+	localparam int unsigned  APTR_BUFFER_REPS =
+		(DATA_WIDTH + APTR_BUFFER_FANOUT - 1) / APTR_BUFFER_FANOUT;
+	uwire [APTR_BUFFER_REPS-1:0][3:0]  addr_buf;
+
+	for(genvar  r = 0; r < APTR_BUFFER_REPS; r++) begin : genAPtrBuf
+		for(genvar  b = 0; b < 4; b++) begin : genBit
+			(* DONT_TOUCH = "true" *)
+			LUT1 #(.INIT(2'h2)) aptr_lut (.I0(addr[b]), .O(addr_buf[r][b]));
+		end : genBit
+	end : genAPtrBuf
+
+	for(genvar  j = 0; j < DATA_WIDTH; j++) begin : genBit
+		localparam int unsigned  APTR_BUFFER_INDEX = j / APTR_BUFFER_FANOUT;
+		SRL16E srl (
+			.CLK(clk),
+			.CE(ce),
+			.D(din[j]),
+			.A3(addr_buf[APTR_BUFFER_INDEX][3]),
+			.A2(addr_buf[APTR_BUFFER_INDEX][2]),
+			.A1(addr_buf[APTR_BUFFER_INDEX][1]),
+			.A0(addr_buf[APTR_BUFFER_INDEX][0]),
+			.Q(dout[j])
+		);
+	end : genBit
+
+endmodule : skid_srl_slice

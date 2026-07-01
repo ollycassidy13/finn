@@ -8,6 +8,56 @@
  * @author	Shane Fleming <shane.fleming@amd.com>
  ***************************************************************************/
 
+module int_to_fp32_pipe #(
+	int unsigned  WIDTH,
+	bit           SIGNED
+)(
+	input	logic              clk,
+	input	logic              rst,
+	input	logic [WIDTH-1:0]  ival,
+	output	logic      [31:0]  fval
+);
+	localparam int unsigned  TAP_W = (WIDTH < 2)? 1 : $clog2(WIDTH);
+
+	uwire              sign = SIGNED ? ival[WIDTH-1] : 1'b0;
+	uwire [WIDTH-1:0]  mag  = SIGNED ? (sign ? -ival : ival) : ival;
+	uwire [WIDTH-1:0]  rev  = {<<{mag}};
+	uwire [WIDTH-1:0]  oh   = (~rev + 1) & rev;
+
+	logic              Sign = 1'b0;
+	logic [WIDTH-1:0]  Mag  = '0;
+	logic [WIDTH-1:0]  Oh   = '0;
+	always_ff @(posedge clk) begin
+		if(rst) begin
+			Sign <= 1'b0;  Mag <= '0;  Oh <= '0;
+		end
+		else begin
+			Sign <= sign;  Mag <= mag;  Oh <= oh;
+		end
+	end
+
+	logic [      7:0]  exp;
+	logic [TAP_W-1:0]  tap;
+	always_comb begin
+		exp = 0;
+		tap = 0;
+		for(int unsigned  i = 0; i < WIDTH; i++) begin
+			if(Oh[i]) begin
+				exp |= (WIDTH + 126) - i;
+				tap |= (WIDTH -   1) - i;
+			end
+		end
+	end
+
+	uwire [WIDTH+22:0]  mag_ext = {Mag, 23'b0};
+	uwire [      22:0]  man = mag_ext[tap+:23];
+
+	always_ff @(posedge clk) begin
+		if(rst)  fval <= '0;
+		else     fval <= {Sign, exp, man};
+	end
+endmodule : int_to_fp32_pipe
+
 module eltwise #(
 	parameter  OP,	// ADD(a+b), SUB(a-b), SBR(b-a), MUL(a*b)
 	int unsigned  PE = 1,
@@ -53,7 +103,7 @@ module eltwise #(
 	localparam bit  HAVE_SCALE = (B_SCALE != 1.0);
 	localparam int unsigned  BINOPF_LATENCY = HAVE_SCALE? 4 : 2 + IS_MUL;
 	localparam int unsigned  BINOPI_LATENCY = IS_MUL? 3 : 1;
-	localparam int unsigned  CONV_LATENCY   = (A_FLOAT ^ B_FLOAT)? 1 : 0;
+	localparam int unsigned  CONV_LATENCY   = (A_FLOAT ^ B_FLOAT)? 3 : 0;
 	localparam int unsigned  LATENCY = BOTH_INT? BINOPI_LATENCY
 	                                           : (BINOPF_LATENCY + CONV_LATENCY);
 
@@ -119,8 +169,21 @@ module eltwise #(
 	end
 
 	//=== Converter Valid Alignment =======================================
-	logic  Take = 1'b0;
-	always_ff @(posedge clk)  Take <= rst? 1'b0 : take;
+	logic  Take1 = 1'b0;
+	logic  Take2 = 1'b0;
+	logic  Take3 = 1'b0;
+	always_ff @(posedge clk) begin
+		if(rst) begin
+			Take1 <= 1'b0;
+			Take2 <= 1'b0;
+			Take3 <= 1'b0;
+		end
+		else begin
+			Take1 <= take;
+			Take2 <= Take1;
+			Take3 <= Take2;
+		end
+	end
 
 	//=== Free-running Compute Pipeline ====================================
 	uwire o_vec_t  r;
@@ -139,48 +202,72 @@ module eltwise #(
 		end : genFF
 
 		else if(!A_FLOAT && B_FLOAT) begin : genIF
-			uwire [31:0]  a_fp;
-			int_to_fp32 #(.WIDTH(A_WIDTH), .SIGNED(A_SIGNED)) conv (
-				.ival(a[i]), .fval(a_fp)
+			logic [A_WIDTH-1:0]  AInt = '0;
+			logic [31:0]  Bd0  = '0;
+			always_ff @(posedge clk) begin
+				if(rst) begin
+					AInt <= '0;  Bd0 <= '0;
+				end
+				else begin
+					AInt <= a[i];
+					Bd0  <= b[i];
+				end
+			end
+			logic [31:0]  AFp;
+			int_to_fp32_pipe #(.WIDTH(A_WIDTH), .SIGNED(A_SIGNED)) conv (
+				.clk, .rst,
+				.ival(AInt), .fval(AFp)
 			);
-			logic [31:0]  AFp = '0;
+			logic [31:0]  Bd1 = '0;
 			logic [31:0]  Bd  = '0;
 			always_ff @(posedge clk) begin
 				if(rst) begin
-					AFp <= '0;  Bd <= '0;
+					Bd1 <= '0;  Bd <= '0;
 				end
 				else begin
-					AFp <= a_fp;
-					Bd  <= b[i];
+					Bd1 <= Bd0;
+					Bd  <= Bd1;
 				end
 			end
 			binopf #(.OP(OP), .B_SCALE(B_SCALE), .FORCE_BEHAVIORAL(FORCE_BEHAVIORAL)) core (
 				.clk, .rst,
-				.a(AFp), .avld(Take),
+				.a(AFp), .avld(Take3),
 				.b(Bd), .bload('1),
 				.r(r[i]), .rvld(rvld_vec[i])
 			);
 		end : genIF
 
 		else if(A_FLOAT && !B_FLOAT) begin : genFI
-			uwire [31:0]  b_fp;
-			int_to_fp32 #(.WIDTH(B_WIDTH), .SIGNED(B_SIGNED)) conv (
-				.ival(b[i]), .fval(b_fp)
+			logic [31:0]  Ad0  = '0;
+			logic [B_WIDTH-1:0]  BInt = '0;
+			always_ff @(posedge clk) begin
+				if(rst) begin
+					Ad0 <= '0;  BInt <= '0;
+				end
+				else begin
+					Ad0  <= a[i];
+					BInt <= b[i];
+				end
+			end
+			logic [31:0]  BFp;
+			int_to_fp32_pipe #(.WIDTH(B_WIDTH), .SIGNED(B_SIGNED)) conv (
+				.clk, .rst,
+				.ival(BInt), .fval(BFp)
 			);
-			logic [31:0]  BFp = '0;
+			logic [31:0]  Ad1 = '0;
 			logic [31:0]  Ad  = '0;
 			always_ff @(posedge clk) begin
 				if(rst) begin
-					BFp <= '0;  Ad <= '0;
+					Ad1 <= '0;  Ad <= '0;
 				end
 				else begin
-					BFp <= b_fp;
-					Ad  <= a[i];
+					Ad1 <= Ad0;
+					Ad  <= Ad1;
 				end
 			end
 			binopf #(.OP(OP), .B_SCALE(B_SCALE), .FORCE_BEHAVIORAL(FORCE_BEHAVIORAL)) core (
 				.clk, .rst,
-				.a(Ad), .avld(Take),
+				.a(Ad), .avld(Take3),
 				.b(BFp), .bload('1),
 				.r(r[i]), .rvld(rvld_vec[i])
 			);

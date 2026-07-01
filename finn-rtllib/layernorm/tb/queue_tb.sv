@@ -42,7 +42,7 @@ module queue_tb;
 		uwire dat_t  odat;
 		uwire  ovld;
 		logic  ordy;
-		queue #(.DATA_WIDTH(DATA_WIDTH), .ELASTICITY(ELASTICITY)) dut (
+		layernorm_queue #(.DATA_WIDTH(DATA_WIDTH), .ELASTICITY(ELASTICITY)) dut (
 			.clk, .rst,
 			.idat, .ivld, .irdy,
 			.odat, .ovld, .ordy

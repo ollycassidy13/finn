@@ -8,7 +8,7 @@
  * @brief	Computes a OP (B_SCALE * b) with OP in +, -, *.
  ***************************************************************************/
 
-module binopf #(
+module layernorm_binopf #(
 	parameter  OP,	// ADD(a+b), SUB(a-b), SBR(b-a), MUL(a*b)
 	shortreal  B_SCALE = 1.0,	// Scale `b` input, must be 1.0 for MUL
 	bit  A_MATCH_OP_DELAY = 0,	// Add delay on `a` input equivalent to this op
@@ -241,4 +241,4 @@ module binopf #(
 		);
 	end : genDSP
 
-endmodule : binopf
+endmodule : layernorm_binopf

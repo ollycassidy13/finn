@@ -56,8 +56,8 @@ FPGA_PART = "xc7z020clg400-1"
 CLK_NS = 10
 
 
-def _make_graph(nodes, output_shape, idx_values=None, finn_dtype=DataType["INT8"]):
-    tokens_shape = [1, 4, 4]
+def _make_graph(nodes, output_shape, idx_values=None, finn_dtype=DataType["INT8"], batch_size=1):
+    tokens_shape = [batch_size, 4, 4]
     tokens = helper.make_tensor_value_info("tokens", TensorProto.FLOAT, tokens_shape)
     output = helper.make_tensor_value_info("out", TensorProto.FLOAT, output_shape)
     initializers = []
@@ -71,7 +71,7 @@ def _make_graph(nodes, output_shape, idx_values=None, finn_dtype=DataType["INT8"
     return model
 
 
-def _make_gather_model(token_index=0):
+def _make_gather_model(token_index=0, batch_size=1):
     idx_values = np.asarray(token_index, dtype=np.int64)
     gather = helper.make_node(
         "Gather",
@@ -80,10 +80,10 @@ def _make_gather_model(token_index=0):
         axis=1,
         name="gather_token",
     )
-    return _make_graph([gather], [1, 4], idx_values)
+    return _make_graph([gather], [batch_size, 4], idx_values, batch_size=batch_size)
 
 
-def _make_selecttoken_model(token_index=0, simd=1, finn_dtype=DataType["INT8"]):
+def _make_selecttoken_model(token_index=0, simd=1, finn_dtype=DataType["INT8"], batch_size=1):
     select = helper.make_node(
         "SelectToken",
         ["tokens"],
@@ -93,12 +93,13 @@ def _make_selecttoken_model(token_index=0, simd=1, finn_dtype=DataType["INT8"]):
         name="SelectToken_0",
         NumTokens=4,
         NumChannels=4,
+        BatchSize=batch_size,
         TokenIndex=token_index,
         SIMD=simd,
         inputDataType=finn_dtype.name,
         outputDataType=finn_dtype.name,
     )
-    return _make_graph([select], [1, 4], None, finn_dtype)
+    return _make_graph([select], [batch_size, 4], None, finn_dtype, batch_size=batch_size)
 
 
 def _prepare_selecttoken_stitched_ip_model(simd=1, token_index=0):
@@ -153,6 +154,30 @@ def test_convert_gather_to_selecttoken(finn_dtype):
     model = model.transform(GiveUniqueNodeNames())
     assert model.graph.node[0].op_type == "SelectToken_rtl"
     assert model.graph.node[0].domain == "finn.custom_op.fpgadataflow.rtl"
+
+
+@pytest.mark.fpgadataflow
+def test_convert_batched_gather_to_selecttoken():
+    model = _make_gather_model(token_index=-1, batch_size=4)
+    tokens = np.arange(64, dtype=np.float32).reshape(4, 4, 4)
+    expected = tokens[:, -1, :]
+
+    ret = execute_onnx(model, _make_input_dict(model, tokens))
+    assert (ret["out"] == expected).all()
+
+    model = model.transform(InferSelectTokenLayer())
+    node = model.graph.node[0]
+    assert node.op_type == "SelectToken"
+
+    inst = getCustomOp(node)
+    assert inst.get_nodeattr("BatchSize") == 4
+    assert inst.get_nodeattr("TokenIndex") == 3
+    assert inst.get_normal_input_shape() == (4, 4, 4)
+    assert inst.get_normal_output_shape() == (4, 4)
+    assert inst.get_exp_cycles() == 64
+
+    ret = execute_onnx(model, _make_input_dict(model, tokens))
+    assert (ret["out"] == expected).all()
 
 
 @pytest.mark.fpgadataflow

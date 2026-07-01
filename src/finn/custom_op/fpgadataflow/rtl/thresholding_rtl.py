@@ -66,6 +66,61 @@ class Thresholding_rtl(Thresholding, RTLBackend):
         my_attrs.update(RTLBackend.get_nodeattr_types(self))
         return my_attrs
 
+    def update_num_threshold_channels_from_model(self, model):
+        """Record original threshold row count for resource estimation.
+
+        Legacy models may not carry numThresholdChannels. The threshold tensor
+        shape is still available in the model, so resource estimation can repair
+        the attribute without changing code generation behavior.
+        """
+        thresholds_shape = model.get_tensor_shape(self.onnx_node.input[1])
+        if thresholds_shape is None:
+            thresholds = model.get_initializer(self.onnx_node.input[1])
+            if thresholds is None:
+                return
+            thresholds_shape = thresholds.shape
+        thresholds_shape = self._threshold_shape_without_mlo_set_dim(thresholds_shape)
+        if len(thresholds_shape) == 0 or thresholds_shape[0] is None:
+            return
+        self.set_nodeattr("numThresholdChannels", int(thresholds_shape[0]))
+
+    def _threshold_shape_without_mlo_set_dim(self, thresholds_shape):
+        shape = list(thresholds_shape)
+        mlo_max_iter = self.get_nodeattr("mlo_max_iter")
+        if mlo_max_iter and len(shape) > 2 and shape[0] == mlo_max_iter:
+            return shape[1:]
+        return shape
+
+    def _get_effective_storage_channels(self):
+        """Return the RTL threshold memory channel count.
+
+        A single threshold row is broadcast to PE rows by make_weight_file() and
+        codegen sets C=PE, so the threshold core has CF=1 instead of
+        NumChannels/PE for that case.
+        """
+        pe = self.get_nodeattr("PE")
+        num_channels = self.get_nodeattr("NumChannels")
+        num_threshold_channels = self.get_nodeattr("numThresholdChannels")
+        if num_threshold_channels == 0:
+            return num_channels
+        if num_threshold_channels == 1:
+            return pe
+        if num_threshold_channels == num_channels:
+            return num_channels
+        raise ValueError(
+            "%s: numThresholdChannels=%d must be 1 or NumChannels=%d"
+            % (self.onnx_node.name, num_threshold_channels, num_channels)
+        )
+
+    def _get_threshold_memory_stage_depth(self, cf, stage):
+        mlo_sets = max(1, self.get_nodeattr("mlo_max_iter"))
+        if mlo_sets > 1:
+            cf_depth = 1 if cf <= 1 else 2 ** math.ceil(math.log2(cf))
+            base_depth = mlo_sets * cf_depth
+        else:
+            base_depth = cf
+        return base_depth * (2**stage)
+
     def get_pe_mem_geometries(self):
         """return a list of (bitwidth, depth) for PE memory configurations to be used
         in resource estimation
@@ -87,15 +142,19 @@ class Thresholding_rtl(Thresholding, RTLBackend):
         wdt_bits = wdt.bitwidth()
         odt = self.get_output_datatype()
         odt_bits = odt.bitwidth()
-        t_channels = self.get_nodeattr("NumChannels")
-        cf = t_channels / pe
-        # For MLO, multiply depth by number of sets (iterations)
-        mlo_sets = max(1, self.get_nodeattr("mlo_max_iter"))
+        t_channels = self._get_effective_storage_channels()
+        cf = t_channels // pe
         is_uniform = self.get_nodeattr("uniform_thres")
         if is_uniform:
-            ret = [(odt_bits - x, cf * (2**x) * mlo_sets) for x in range(1, odt_bits)]
+            ret = [
+                (odt_bits - x, self._get_threshold_memory_stage_depth(cf, x))
+                for x in range(1, odt_bits)
+            ]
         else:
-            ret = [(wdt_bits, cf * (2**x) * mlo_sets) for x in range(odt_bits)]
+            ret = [
+                (wdt_bits, self._get_threshold_memory_stage_depth(cf, x))
+                for x in range(odt_bits)
+            ]
         return ret
 
     def _get_memory_estimate_details(self):
@@ -192,7 +251,9 @@ class Thresholding_rtl(Thresholding, RTLBackend):
 
         t_path = self.get_nodeattr("code_gen_dir_ipgen")
 
-        if not self.get_nodeattr("mlo_max_iter"):
+        if (not self.get_nodeattr("mlo_max_iter")) or (
+            model.get_initializer(self.onnx_node.input[1]) is not None
+        ):
             self.generate_params(model, t_path)
 
         bias = self.get_nodeattr("ActVal")  # activation bias value
@@ -227,7 +288,10 @@ class Thresholding_rtl(Thresholding, RTLBackend):
                 )
 
         # If a single threshold value is found, set num_channels to PE
-        thresholds_shape = model.get_tensor_shape(self.onnx_node.input[1])
+        thresholds_shape = self._threshold_shape_without_mlo_set_dim(
+            model.get_tensor_shape(self.onnx_node.input[1])
+        )
+        self.set_nodeattr("numThresholdChannels", int(thresholds_shape[0]))
         if thresholds_shape[0] == 1:
             num_channels = pe
 
@@ -445,6 +509,33 @@ class Thresholding_rtl(Thresholding, RTLBackend):
             "create_bd_cell -type module -reference %s %s"
             % (self.get_nodeattr("gen_top_module"), self.onnx_node.name)
         )
+        if not self.get_nodeattr("mlo_max_iter"):
+            selector_width = roundup_to_integer_multiple(1, 8)
+            const_inst = "%s_selector_zero" % self.onnx_node.name
+            cmd.append(
+                "create_bd_cell -type ip -vlnv xilinx.com:ip:xlconstant:1.1 %s" % const_inst
+            )
+            cmd.append(
+                "set_property -dict [list CONFIG.CONST_WIDTH {1} CONFIG.CONST_VAL {0}] "
+                "[get_bd_cells %s]" % const_inst
+            )
+            cmd.append(
+                "connect_bd_net [get_bd_pins %s/dout] [get_bd_pins %s/in1_V_TVALID]"
+                % (const_inst, self.onnx_node.name)
+            )
+            const_data_inst = "%s_selector_data_zero" % self.onnx_node.name
+            cmd.append(
+                "create_bd_cell -type ip -vlnv xilinx.com:ip:xlconstant:1.1 %s"
+                % const_data_inst
+            )
+            cmd.append(
+                "set_property -dict [list CONFIG.CONST_WIDTH {%d} CONFIG.CONST_VAL {0}] "
+                "[get_bd_cells %s]" % (selector_width, const_data_inst)
+            )
+            cmd.append(
+                "connect_bd_net [get_bd_pins %s/dout] [get_bd_pins %s/in1_V_TDATA]"
+                % (const_data_inst, self.onnx_node.name)
+            )
 
         return cmd
 
@@ -455,8 +546,82 @@ class Thresholding_rtl(Thresholding, RTLBackend):
 
         return intf_names
 
+    def generate_mlo_params(self, thresholds, path):
+        """Generate concatenated threshold memories for standalone MLO thresholding."""
+
+        mlo_max_iter = self.get_nodeattr("mlo_max_iter")
+        assert thresholds.shape[0] == mlo_max_iter
+        pe = self.get_nodeattr("PE")
+        output_data_type = self.get_nodeattr("outputDataType")
+        o_bitwidth = DataType[output_data_type].bitwidth()
+        node_name = self.onnx_node.name
+        file_name = "{}/memblock.dat".format(path)
+
+        for set_index in range(mlo_max_iter):
+            threshold_set = thresholds[set_index]
+            thresholds_sorted = np.all(np.diff(threshold_set, axis=-1) >= 0)
+            assert thresholds_sorted, (
+                f"{node_name}: MLO threshold set {set_index} must be sorted in "
+                "ascending order for RTL thresholding."
+            )
+            self.make_weight_file(threshold_set, "internal_embedded", file_name)
+            for stage in range(o_bitwidth):
+                for pe_value in range(pe):
+                    param_path = os.path.join(
+                        path,
+                        "%s_threshs_%s_%s.dat" % (node_name, pe_value, stage),
+                    )
+                    iter_path = os.path.join(
+                        path,
+                        "%s_threshs_%s_%s_i%s.dat"
+                        % (node_name, pe_value, stage, set_index),
+                    )
+                    shutil.move(param_path, iter_path)
+
+        for stage in range(o_bitwidth):
+            for pe_value in range(pe):
+                param_path = os.path.join(
+                    path,
+                    "%s_threshs_%s_%s.dat" % (node_name, pe_value, stage),
+                )
+                with open(param_path, "w") as outfile:
+                    for set_index in range(mlo_max_iter):
+                        iter_path = os.path.join(
+                            path,
+                            "%s_threshs_%s_%s_i%s.dat"
+                            % (node_name, pe_value, stage, set_index),
+                        )
+                        with open(iter_path, "r") as infile:
+                            lines = infile.readlines()
+                        for line in lines:
+                            outfile.write(line)
+                        count = len(lines)
+                        if count and (count & (count - 1)) != 0:
+                            hex_len = len(lines[0].strip())
+                            next_pow2 = 2 ** math.ceil(math.log2(count))
+                            pad_val = 2**o_bitwidth - 1
+                            for _ in range(next_pow2 - count):
+                                outfile.write(hex(pad_val)[2:].zfill(hex_len) + "\n")
+                        os.remove(iter_path)
+
     def generate_params(self, model, path):
         thresholds = model.get_initializer(self.onnx_node.input[1])
+        if thresholds is None:
+            if self.get_nodeattr("mlo_max_iter"):
+                return
+            raise ValueError(
+                "%s: threshold initializer %s is required for RTL thresholding codegen"
+                % (self.onnx_node.name, self.onnx_node.input[1])
+            )
+
+        mlo_max_iter = self.get_nodeattr("mlo_max_iter")
+        if (
+            mlo_max_iter
+            and thresholds.ndim > 2
+            and thresholds.shape[0] == mlo_max_iter
+        ):
+            self.generate_mlo_params(thresholds, path)
+            return
 
         # RTL thresholding uses binary search, which requires sorted thresholds
         # Check that thresholds are sorted in ascending order along the last axis

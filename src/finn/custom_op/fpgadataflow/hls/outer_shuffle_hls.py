@@ -59,8 +59,13 @@ class OuterShuffle_hls(OuterShuffle, HLSBackend):
         return OuterShuffle.get_nodeattr_types(self) | HLSBackend.get_nodeattr_types(self)
 
     def global_includes(self):
+        input_gen_header = (
+            '#include "input_gen_uram.hpp"'
+            if self.get_nodeattr("ram_style") == "ultra"
+            else '#include "input_gen.hpp"'
+        )
         self.code_gen_dict["$GLOBALS$"] = [
-            '#include "input_gen.hpp"',
+            input_gen_header,
             "#include <ap_int.h>",
             "#include <hls_vector.h>",
             "#include <hls_stream.h>",
@@ -79,10 +84,10 @@ class OuterShuffle_hls(OuterShuffle, HLSBackend):
 
     def docompute(self):
         simd = self.get_nodeattr("SIMD")
-        out_shape = self.get_nodeattr("transpose_out_shape")
-        out_shape[-1] = int(out_shape[-1] / simd)
-        loop_coeffs = [1 if x == 1 else int(x / simd) for x in self.get_nodeattr("loop_coeffs")]
-        interleaved = [int(item) for pair in zip(out_shape, loop_coeffs) for item in pair]
+        total_elems, interleaved = self.get_input_gen_params()
+        input_gen_fn = (
+            "input_gen_uram" if self.get_nodeattr("ram_style") == "ultra" else "input_gen"
+        )
         self.code_gen_dict["$DOCOMPUTE$"] = [
             f"""
             hls::stream<TV>  src0;
@@ -91,7 +96,7 @@ class OuterShuffle_hls(OuterShuffle, HLSBackend):
             #pragma HLS stream variable=dst0 depth=2
 
             move(in0_V, src0);
-            input_gen<-1,{np.prod(out_shape)},{','.join(map(str,interleaved))}>(src0, dst0);
+            {input_gen_fn}<-1,{total_elems},{','.join(map(str,interleaved))}>(src0, dst0);
             move(dst0, out0_V);
 
             """

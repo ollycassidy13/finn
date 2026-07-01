@@ -55,6 +55,9 @@ class Thresholding(HWCustomOp):
             "PE": ("i", True, 0),
             # number of channels (each may have different thresholds)
             "NumChannels": ("i", True, 0),
+            # number of rows in the original threshold tensor. A value of 1
+            # means one per-tensor threshold table is broadcast across channels.
+            "numThresholdChannels": ("i", False, 0),
             # number of steps in thresholding function. Used only in decoupled mode
             "numSteps": ("i", True, 1),
             # FINN DataTypes for inputs, outputs
@@ -293,6 +296,12 @@ class Thresholding(HWCustomOp):
         """Calculates and returns TMEM."""
         num_channels = self.get_nodeattr("NumChannels")
         pe = self.get_nodeattr("PE")
+        assert (
+            num_channels % pe == 0
+        ), (
+            f"{self.onnx_node.name}: requirement NumChannels divisible by PE is "
+            f"violated: NumChannels={num_channels}, PE={pe}"
+        )
         return num_channels // pe
 
     def get_verilog_top_module_intf_names(self):

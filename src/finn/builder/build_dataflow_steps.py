@@ -140,7 +140,7 @@ from finn.util.config import (
     extract_model_config_consolidate_shuffles,
     extract_model_config_to_json,
 )
-from finn.util.fpgadataflow import warn_hls_rtl_dsp_conflict
+from finn.util.fpgadataflow import is_hls_node, is_rtl_node, warn_hls_rtl_dsp_conflict
 from finn.util.mlo_sim import is_mlo, mlo_prehook_func_factory
 from finn.util.test import execute_parent
 from finn.util.vivado import parse_ooc_synth_results
@@ -295,28 +295,44 @@ def prepare_loop_ops_fifo_sizing(node, cfg):
     loop_nodes = loop_model.get_nodes_by_op_type("FINNLoop")
     for loop_node in loop_nodes:
         prepare_loop_ops_fifo_sizing(loop_node, cfg)
-    loop_model = loop_model.transform(
-        PrepareIP(cfg._resolve_fpga_part(), cfg._resolve_hls_clk_period())
-    )
-    loop_model = loop_model.transform(HLSSynthIP(cfg._resolve_hls_clk_period()))
-    loop_model = loop_model.transform(ReplaceVerilogRelPaths())
-    if cfg.fifosim_save_waveform:
-        report_dir = cfg.output_dir + "/report"
-        os.makedirs(report_dir, exist_ok=True)
-        loop_model.set_metadata_prop(
-            "rtlsim_trace", os.path.abspath(report_dir) + f"/{node.name}_fifosim_trace.wdb"
+
+    if cfg.auto_fifo_depths:
+        loop_model = loop_model.transform(
+            PrepareIP(cfg._resolve_fpga_part(), cfg._resolve_hls_clk_period())
         )
-    loop_model = loop_model.transform(
-        InsertAndSetFIFODepths(
-            cfg._resolve_fpga_part(),
-            cfg._resolve_hls_clk_period(),
-            swg_exception=cfg.default_swg_exception,
-            vivado_ram_style=cfg.large_fifo_mem_style,
-            fifosim_input_throttle=cfg.fifosim_input_throttle,
-            cfg_n_inferences=cfg.fifosim_n_inferences,
+        loop_model = loop_model.transform(HLSSynthIP(cfg._resolve_hls_clk_period()))
+        loop_model = loop_model.transform(ReplaceVerilogRelPaths())
+        if cfg.fifosim_save_waveform:
+            report_dir = cfg.output_dir + "/report"
+            os.makedirs(report_dir, exist_ok=True)
+            loop_model.set_metadata_prop(
+                "rtlsim_trace", os.path.abspath(report_dir) + f"/{node.name}_fifosim_trace.wdb"
+            )
+        loop_model = loop_model.transform(
+            InsertAndSetFIFODepths(
+                cfg._resolve_fpga_part(),
+                cfg._resolve_hls_clk_period(),
+                swg_exception=cfg.default_swg_exception,
+                vivado_ram_style=cfg.large_fifo_mem_style,
+                fifosim_input_throttle=cfg.fifosim_input_throttle,
+                cfg_n_inferences=cfg.fifosim_n_inferences,
+            )
         )
-    )
-    loop_model = loop_model.transform(SplitLargeFIFOs())
+    else:
+        print(
+            "auto_fifo_depths is set to False, inserting configured FIFO depths "
+            f"for loop body {node.name}."
+        )
+        loop_model = loop_model.transform(InsertDWC())
+        loop_model = loop_model.transform(InsertFIFO(create_shallow_fifos=True))
+        loop_model = loop_model.transform(SpecializeLayers(cfg._resolve_fpga_part()))
+        loop_model = loop_model.transform(GiveUniqueNodeNames(prefix=node.name + "_"))
+        loop_model = loop_model.transform(GiveReadableTensorNames())
+        if cfg.folding_config_file is not None:
+            loop_model = loop_model.transform(ApplyConfig(cfg.folding_config_file))
+
+    if cfg.split_large_fifos:
+        loop_model = loop_model.transform(SplitLargeFIFOs())
     loop_model = loop_model.transform(RemoveShallowFIFOs())
     loop_model = loop_model.transform(GiveUniqueNodeNames(prefix=node.name + "_"))
     loop_model = loop_model.transform(GiveReadableTensorNames())
@@ -881,7 +897,10 @@ def step_hw_ipgen(model: ModelWrapper, cfg: DataflowBuildConfig):
     loop_nodes = model.get_nodes_by_op_type("FINNLoop")
     for node in loop_nodes:
         prepare_loop_ops_ipgen(node, cfg)
-    model = model.transform(HLSSynthIP(cfg._resolve_fpga_part()))
+    # The top-level MLO model carries the loop body as a ModelProto-valued
+    # attribute. Passing that through NodeLocalTransformation multiprocessing can
+    # corrupt very large protobuf payloads, so keep this transform local.
+    model = model.transform(HLSSynthIP(cfg._resolve_fpga_part(), num_workers=1))
     model = model.transform(ReplaceVerilogRelPaths())
     report_dir = cfg.output_dir + "/report"
     os.makedirs(report_dir, exist_ok=True)
@@ -1058,25 +1077,126 @@ def step_set_fifo_depths(model: ModelWrapper, cfg: DataflowBuildConfig):
     # after FIFOs are ready to go, call PrepareIP and HLSSynthIP again
     # this will only run for the new nodes (e.g. FIFOs and DWCs)
     model = model.transform(PrepareIP(cfg._resolve_fpga_part(), cfg._resolve_hls_clk_period()))
-    model = model.transform(HLSSynthIP(cfg._resolve_fpga_part()))
+    # Keep this serial for large MLO graphs. The FINNLoop body is carried as a
+    # ModelProto-valued attribute, and multiprocessing can fail while pickling it.
+    model = model.transform(HLSSynthIP(cfg._resolve_fpga_part(), num_workers=1))
     return model
 
 
 def verify_mlo(model: ModelWrapper, cfg: DataflowBuildConfig, step: str):
-    finn_loop = model.get_nodes_by_op_type("FINNLoop")
-    # TODO: allow for multiple FINNLoops
-    mlo_prehook = mlo_prehook_func_factory(finn_loop[0])
+    finn_loops = model.get_nodes_by_op_type("FINNLoop")
+    aximm_maps = json.loads(model.get_metadata_prop("vivado_stitch_finnloop_aximm_map") or "{}")
+    mlo_prehooks = [
+        mlo_prehook_func_factory(loop_node, aximm_maps.get(loop_node.name, {}))
+        for loop_node in finn_loops
+    ]
+
+    def mlo_prehook(sim):
+        for prehook in mlo_prehooks:
+            prehook(sim)
+
     verify_step(model, cfg, "stitched_ip_rtlsim", need_parent=False, rtlsim_pre_hook=mlo_prehook)
+
+
+def write_non_fpgadataflow_stitch_report(
+    model: ModelWrapper, cfg: DataflowBuildConfig, filename: str
+):
+    """Write stitch blockers for top-level nodes that are not HLS/RTL IP."""
+
+    blockers = []
+    initializer_names = {initializer.name for initializer in model.graph.initializer}
+    graph_output_names = {output.name for output in model.graph.output}
+    for index, node in enumerate(model.graph.node):
+        if is_hls_node(node) or is_rtl_node(node):
+            continue
+        input_sources = []
+        for tensor_name in node.input:
+            producer = model.find_producer(tensor_name)
+            input_sources.append(
+                {
+                    "tensor": tensor_name,
+                    "producer": None if producer is None else producer.name,
+                    "producer_op_type": None if producer is None else producer.op_type,
+                    "initializer": tensor_name in initializer_names,
+                }
+            )
+        output_sinks = []
+        for tensor_name in node.output:
+            consumers = model.find_consumers(tensor_name) or []
+            output_sinks.append(
+                {
+                    "tensor": tensor_name,
+                    "consumers": [consumer.name for consumer in consumers],
+                    "consumer_op_types": [consumer.op_type for consumer in consumers],
+                    "is_graph_output": tensor_name in graph_output_names,
+                }
+            )
+        blockers.append(
+            {
+                "index": index,
+                "name": node.name,
+                "op_type": node.op_type,
+                "inputs": list(node.input),
+                "outputs": list(node.output),
+                "input_sources": input_sources,
+                "output_sinks": output_sinks,
+            }
+        )
+
+    report_dir = cfg.output_dir + "/report"
+    os.makedirs(report_dir, exist_ok=True)
+    report_path = report_dir + "/" + filename
+    with open(report_path, "w") as f:
+        json.dump(
+            {
+                "non_fpgadataflow_node_count": len(blockers),
+                "non_fpgadataflow_nodes": blockers,
+            },
+            f,
+            indent=2,
+        )
+    return blockers, report_path
 
 
 def step_create_stitched_ip(model: ModelWrapper, cfg: DataflowBuildConfig):
     """Create stitched IP for a graph after all HLS IP blocks have been generated.
     Depends on the DataflowOutputType.STITCHED_IP output product."""
 
+    def save_model_from_env(env_name):
+        model_path = os.environ.get(env_name)
+        if model_path:
+            model_dir = os.path.dirname(model_path)
+            if model_dir:
+                os.makedirs(model_dir, exist_ok=True)
+            model.save(model_path)
+            print(f"Saved {env_name} model to {model_path}")
+
     if DataflowOutputType.STITCHED_IP in cfg.generate_outputs:
+        blockers, report_path = write_non_fpgadataflow_stitch_report(
+            model, cfg, "non_fpgadataflow_nodes_before_stitch_cleanup.json"
+        )
+        if blockers:
+            from qonnx.transformation.remove import RemoveUnusedNodes
+
+            model = model.transform(RemoveUnusedNodes(), cleanup=False)
+            blockers, report_path = write_non_fpgadataflow_stitch_report(
+                model, cfg, "non_fpgadataflow_nodes_before_stitch.json"
+            )
+            if blockers:
+                preview = ", ".join(
+                    f"{node['name']}:{node['op_type']}" for node in blockers[:10]
+                )
+                if len(blockers) > 10:
+                    preview += ", ..."
+                raise AssertionError(
+                    "Top-level stitched IP requires all nodes to be FINN "
+                    f"fpgadataflow nodes; found {len(blockers)} blockers: "
+                    f"{preview}. See {report_path}"
+                )
         stitched_ip_dir = cfg.output_dir + "/stitched_ip"
         # If OOC_SYNTH is also requested, run P&R to extract metrics
         run_pnr = DataflowOutputType.OOC_SYNTH in cfg.generate_outputs
+        save_model_from_env("FINN_PRE_VIVADO_STITCH_MODEL")
         model = model.transform(
             CreateStitchedIP(
                 cfg._resolve_fpga_part(),
@@ -1094,8 +1214,15 @@ def step_create_stitched_ip(model: ModelWrapper, cfg: DataflowBuildConfig):
                 # Calculate estimated throughput from fmax and cycle analysis
                 estimate_network_performance = model.analysis(dataflow_performance)
                 n_clock_cycles_per_sec = float(ooc_res_dict["fmax_mhz"]) * (10**6)
-                est_fps = n_clock_cycles_per_sec / estimate_network_performance["max_cycles"]
-                ooc_res_dict["estimated_throughput_fps"] = est_fps
+                max_cycles = estimate_network_performance["max_cycles"]
+                if max_cycles > 0:
+                    est_fps = n_clock_cycles_per_sec / max_cycles
+                    ooc_res_dict["estimated_throughput_fps"] = est_fps
+                else:
+                    ooc_res_dict["estimated_throughput_fps"] = None
+                    ooc_res_dict["estimated_throughput_fps_note"] = (
+                        "not_available_zero_cycle_estimate"
+                    )
 
                 model.set_metadata_prop("res_total_ooc_synth", str(ooc_res_dict))
                 # Write results to report directory
@@ -1109,6 +1236,7 @@ def step_create_stitched_ip(model: ModelWrapper, cfg: DataflowBuildConfig):
             model.get_metadata_prop("vivado_stitch_proj"), stitched_ip_dir, dirs_exist_ok=True
         )
         print("Vivado stitched IP written into " + stitched_ip_dir)
+        save_model_from_env("FINN_POST_VIVADO_STITCH_MODEL")
 
     else:
         print(

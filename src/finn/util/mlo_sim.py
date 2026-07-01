@@ -72,10 +72,13 @@ def dat_file_to_numpy_array(file_path):
     return byte_array
 
 
-def mlo_prehook_func_factory(node) -> Callable[[SimEngine], None]:
+def mlo_prehook_func_factory(node, interface_name_map=None) -> Callable[[SimEngine], None]:
     """Factory that will construct a prehook function to
     setup the axi memory mapped interfaces for MLO validation.
     """
+
+    if interface_name_map is None:
+        interface_name_map = {}
 
     # Get the FINNLoop
     finnloop_op = getHWCustomOp(node)  # No model context: read only
@@ -83,10 +86,12 @@ def mlo_prehook_func_factory(node) -> Callable[[SimEngine], None]:
     finnloop_body = finnloop_op.get_nodeattr("body")
 
     mvau_hbm_weights = {}
+    hbm_name = interface_name_map.get("m_axi_hbm", "m_axi_hbm")
     extern_idx = 0
     for idx, lb_inp in enumerate(finnloop_body.graph.input):
         downstream = finnloop_body.find_consumer(lb_inp.name)
         if downstream.op_type.startswith("MVAU"):
+            extern_name = f"m_axi_MVAU_id_{idx}"
             mvau_hbm_weights[idx] = {}
             mvau_hbm_weights[idx]["name"] = lb_inp.name
             code_gen_dir = finnloop_op.get_nodeattr("code_gen_dir_ipgen")
@@ -120,12 +125,14 @@ def mlo_prehook_func_factory(node) -> Callable[[SimEngine], None]:
             else:
                 mvau_hbm_weights[idx]["value"] = dat_file_to_numpy_array(datfile)
             mvau_hbm_weights[idx]["extern_idx"] = extern_idx
-            mvau_hbm_weights[idx]["extern_name"] = f"m_axi_MVAU_id_{idx}"
+            mvau_hbm_weights[idx]["extern_name"] = interface_name_map.get(
+                extern_name, extern_name
+            )
             extern_idx += 1
 
     def mlo_rtlsim_prehook(sim):
-        if _has_aximm_read_bus(sim, "m_axi_hbm"):
-            sim.aximm_queue("m_axi_hbm")
+        if _has_aximm_read_bus(sim, hbm_name):
+            sim.aximm_queue(hbm_name)
         for name, intf in mvau_hbm_weights.items():
             if _has_aximm_read_bus(sim, intf["extern_name"]):
                 sim.aximm_ro_image(intf["extern_name"], 0, intf["value"].flatten())

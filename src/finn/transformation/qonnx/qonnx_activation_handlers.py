@@ -483,10 +483,18 @@ class QuantIdentityHandler(QuantActBaseHandler):
     def _check_compatibility(self):
         # Gather parameters to check
         if self._q_node.op_type == "Quant":
-            if not self._model.get_initializer(self._q_node.input[2]) == 0:
+            quant_scale = self._model.get_initializer(self._q_node.input[1])
+            zero_point = self._model.get_initializer(self._q_node.input[2])
+            if zero_point is None:
+                raise ValueError("Quant identity activations require a static zero-point.")
+            if quant_scale is None:
+                raise ValueError("Quant identity activations require a static scale.")
+            num_scale_channels = quant_scale.flatten().shape[0]
+            num_zero_point_channels = zero_point.flatten().shape[0]
+            if num_zero_point_channels not in (1, num_scale_channels):
                 raise ValueError(
-                    "Only Quant nodes with zero-point == 0 "
-                    "are currently supported for identity activations."
+                    "Quant identity activations only support scalar zero-point or "
+                    "one zero-point per scale channel."
                 )
         elif self._q_node.op_type == "BipolarQuant":
             quant_scale = self._model.get_initializer(self._q_node.input[1])
@@ -522,7 +530,8 @@ class QuantIdentityHandler(QuantActBaseHandler):
                     min_non_scaled_val = -(2 ** (bit_width - 1) - 1)
                 else:
                     min_non_scaled_val = -(2 ** (bit_width - 1))
-            bias = np.array([min_non_scaled_val], dtype=np_default_dtype)
+            zero_point = self._model.get_initializer(self._q_node.input[2])
+            bias = np.array([min_non_scaled_val], dtype=np_default_dtype) - zero_point
         return bias
 
     def _calculate_thresholds(self):
@@ -531,10 +540,12 @@ class QuantIdentityHandler(QuantActBaseHandler):
         q_inst = getHWCustomOp(self._q_node, self._model)
         if self._q_node.op_type == "Quant":
             bit_width = self._model.get_initializer(self._q_node.input[3])
+            zero_point = self._model.get_initializer(self._q_node.input[2])
             narrow = q_inst.get_nodeattr("narrow")
             signed = q_inst.get_nodeattr("signed")
         elif self._q_node.op_type == "BipolarQuant":
             bit_width = 1.0
+            zero_point = np.array([0.0], dtype=np_default_dtype)
         else:
             raise RuntimeError("Got an unexpected quantizer node type")
 
@@ -553,6 +564,7 @@ class QuantIdentityHandler(QuantActBaseHandler):
 
             num_thresholds = int(num_distinct_values - 1)
             flat_scale = quant_scale.flatten()
+            flat_zero_point = zero_point.flatten()
             num_scale_channels = flat_scale.shape[0]
             step = np.abs(flat_scale)
             half_step = step / 2.0
@@ -565,8 +577,12 @@ class QuantIdentityHandler(QuantActBaseHandler):
             if not signed:
                 min_threshold = half_step
             for c in range(num_scale_channels):
+                zero_point_index = 0 if flat_zero_point.shape[0] == 1 else c
+                shifted_min_threshold = (
+                    min_threshold[c] - step[c] * flat_zero_point[zero_point_index]
+                )
                 for t in range(num_thresholds):
-                    thresholds[c][t] = min_threshold[c] + step[c] * t
+                    thresholds[c][t] = shifted_min_threshold + step[c] * t
 
             # First try to consider the tensor layout of the output for
             # determining the number of output channels

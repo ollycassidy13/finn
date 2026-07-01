@@ -30,6 +30,7 @@ import copy
 import math
 import numpy as np
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -48,9 +49,14 @@ from finn.transformation.fpgadataflow.annotate_cycles import AnnotateCycles
 from finn.util.basic import getHWCustomOp, make_build_dir
 from finn.util.create import adjacency_list
 from finn.util.data_packing import npy_to_rtlsim_input, rtlsim_output_to_npy
+from finn.util.fpgadataflow import is_hls_node, is_rtl_node
 from finn.util.mlo_sim import mlo_prehook_func_factory
 
 finnxsi = xsi if xsi.is_available() else None
+
+OVERLAPPED_SCHEDULER_ARTIFACT_SUFFIXES = {".onnx", ".v", ".sv", ".vhd", ".vhdl"}
+OVERLAPPED_SCHEDULER_WRAPPER_SUFFIXES = {".v", ".sv"}
+OVERLAPPED_SCHEDULER_BUILTINS = {"stream_feedback"}
 
 
 def collect_ip_dirs(model, ipstitch_path):
@@ -75,6 +81,99 @@ def collect_ip_dirs(model, ipstitch_path):
     return ip_dirs
 
 
+def _collapse_generated_ip_repo_path(path):
+    """Return the generated-build root Vivado should scan for this IP."""
+
+    if path.startswith("$"):
+        return path
+    norm_path = os.path.normpath(path)
+    parts = norm_path.split(os.sep)
+    for i, part in enumerate(parts):
+        if part.startswith("finn_temp_file"):
+            return os.sep.join(parts[: i + 1]) or os.sep
+    for i, part in enumerate(parts):
+        if part.startswith("code_gen_ipgen_") or part.startswith("vivado_stitch_proj_"):
+            return os.sep.join(parts[:i]) or os.sep
+    return norm_path
+
+
+def _collapse_ip_repo_paths(ip_dirs, collapse_generated=True):
+    """Deduplicate IP repo paths, optionally collapsing generated repos."""
+
+    paths = list(ip_dirs)
+    has_list_prefix = bool(paths and paths[0] == "list")
+    if has_list_prefix:
+        paths = paths[1:]
+
+    collapsed = []
+    seen = set()
+    for path in paths:
+        repo_path = _collapse_generated_ip_repo_path(path) if collapse_generated else path
+        if repo_path in seen:
+            continue
+        seen.add(repo_path)
+        collapsed.append(repo_path)
+    if has_list_prefix:
+        return ["list"] + collapsed
+    return collapsed
+
+
+def _ip_repo_paths_cmds(ip_dirs, append=False, collapse_generated=True, max_cmd_chars=20000):
+    paths = _collapse_ip_repo_paths(ip_dirs, collapse_generated=collapse_generated)
+    if paths and paths[0] == "list":
+        paths = paths[1:]
+    cmds = []
+    if not append:
+        cmds.append("set_property ip_repo_paths [list] [current_project]")
+    chunk = []
+    chunk_chars = 0
+    for path in paths:
+        path_len = len(path) + 1
+        if chunk and chunk_chars + path_len > max_cmd_chars:
+            cmds.append(
+                "set_property ip_repo_paths "
+                "[concat [get_property ip_repo_paths [current_project]] "
+                "[list %s]] [current_project]" % " ".join(chunk)
+            )
+            chunk = []
+            chunk_chars = 0
+        chunk.append(path)
+        chunk_chars += path_len
+    if chunk:
+        cmds.append(
+            "set_property ip_repo_paths "
+            "[concat [get_property ip_repo_paths [current_project]] "
+            "[list %s]] [current_project]" % " ".join(chunk)
+        )
+    return cmds
+
+
+def _ip_repo_paths_set_cmd(ip_dirs, collapse_generated=True):
+    return "\n".join(
+        _ip_repo_paths_cmds(ip_dirs, append=False, collapse_generated=collapse_generated)
+    )
+
+
+def _ip_repo_paths_append_cmd(ip_dirs, collapse_generated=True):
+    return "\n".join(
+        _ip_repo_paths_cmds(ip_dirs, append=True, collapse_generated=collapse_generated)
+    )
+
+
+def _add_files_copy_to_cmd(source_target, source_file):
+    return "add_files -force -copy_to %s -norecurse %s" % (source_target, source_file)
+
+
+def _bd_clock_freq_hz_cmds(clk_ns, has_clk2x):
+    fclk_hz = round(1e9 / float(clk_ns))
+    cmds = ["set_property CONFIG.FREQ_HZ %d [get_bd_ports /ap_clk]" % fclk_hz]
+    if has_clk2x:
+        cmds.append(
+            "set_property CONFIG.FREQ_HZ %d [get_bd_ports /ap_clk2x]" % (2 * fclk_hz)
+        )
+    return cmds
+
+
 class FINNLoop(HWCustomOp, RTLBackend):
     """Class that corresponds to the meta/container node FINN loop
     which is a placeholder for a group of fpgadataflow nodes that have been separated
@@ -91,10 +190,154 @@ class FINNLoop(HWCustomOp, RTLBackend):
             # Path to save per-iteration execution context (cppsim only).
             # If non-empty, each iteration's full context is saved to this path.
             "iteration_context_path": ("s", False, ""),
+            # FINNLoop input indexes that are dynamic loop-invariant streams.
+            # These inputs are provided once per outer invocation and replayed
+            # to the loop body for every iteration instead of being compiled
+            # into static per-iteration memstream parameter sets.
+            "dynamic_loop_inputs": ("ints", False, []),
+            # Sequential is the existing MLO implementation. Overlapped is only
+            # valid when an explicit graph/RTL scheduler artifact is available.
+            "loop_scheduler_mode": ("s", False, "sequential", {"sequential", "overlapped"}),
+            "overlapped_body_ii_cycles": ("i", False, 0),
+            "overlapped_scheduler_artifact": ("s", False, ""),
+            "overlapped_scheduler_dcp_ready": ("i", False, 0),
+            # Clock period from PrepareIP, needed when packaging loop-local BDs.
+            "clk_ns": ("f", False, 10.0),
         }
         my_attrs.update(HWCustomOp.get_nodeattr_types(self))
         my_attrs.update(RTLBackend.get_nodeattr_types(self))
         return my_attrs
+
+    def _dynamic_loop_inputs(self):
+        return set(int(x) for x in self.get_nodeattr("dynamic_loop_inputs"))
+
+    def _loop_overhead_per_iter(self):
+        return 40
+
+    def _overlapped_scheduler_builtin(self):
+        artifact = self.get_nodeattr("overlapped_scheduler_artifact")
+        if artifact in OVERLAPPED_SCHEDULER_BUILTINS:
+            return artifact
+        return None
+
+    def _uses_builtin_stream_feedback_scheduler(self):
+        return (
+            self.get_nodeattr("loop_scheduler_mode") == "overlapped"
+            and self._overlapped_scheduler_builtin() == "stream_feedback"
+            and int(self.get_nodeattr("overlapped_scheduler_dcp_ready")) == 1
+        )
+
+    def _overlapped_scheduler_artifact_candidates(self):
+        artifact = self.get_nodeattr("overlapped_scheduler_artifact")
+        if artifact == "":
+            return []
+        if artifact in OVERLAPPED_SCHEDULER_BUILTINS:
+            return []
+        path = Path(artifact)
+        if path.is_absolute():
+            return [path]
+        candidates = []
+        code_gen_dir = self.get_nodeattr("code_gen_dir_ipgen")
+        if code_gen_dir != "":
+            candidates.append(Path(code_gen_dir) / path)
+        candidates.append(path)
+        return candidates
+
+    def _overlapped_scheduler_artifact_path(self):
+        candidates = self._overlapped_scheduler_artifact_candidates()
+        for path in candidates:
+            if path.is_file():
+                return path
+        return candidates[0] if candidates else None
+
+    def _overlapped_scheduler_artifact_ready(self):
+        if self._overlapped_scheduler_builtin() is not None:
+            return int(self.get_nodeattr("overlapped_scheduler_dcp_ready")) == 1
+        path = self._overlapped_scheduler_artifact_path()
+        return (
+            path is not None
+            and path.is_file()
+            and path.suffix.lower() in OVERLAPPED_SCHEDULER_ARTIFACT_SUFFIXES
+        )
+
+    def _loop_wrapper_module_name(self):
+        return f"{self.onnx_node.name}_loop_cont_wrapper"
+
+    def _loop_wrapper_source_path(self):
+        code_gen_dir = Path(self.get_nodeattr("code_gen_dir_ipgen"))
+        suffix = ".v"
+        if self.get_nodeattr("loop_scheduler_mode") == "overlapped":
+            artifact_path = self._overlapped_scheduler_artifact_path()
+            if (
+                artifact_path is not None
+                and artifact_path.suffix.lower() in OVERLAPPED_SCHEDULER_WRAPPER_SUFFIXES
+            ):
+                suffix = artifact_path.suffix.lower()
+        return code_gen_dir / f"{self.onnx_node.name}_wrapper{suffix}"
+
+    def _overlapped_scheduler_wrapper_source(self):
+        if self.get_nodeattr("loop_scheduler_mode") != "overlapped":
+            return None
+        if int(self.get_nodeattr("overlapped_scheduler_dcp_ready")) != 1:
+            raise RuntimeError(
+                f"{self.onnx_node.name}: overlapped FINNLoop HDL generation requires "
+                "overlapped_scheduler_dcp_ready=1 and a real scheduler wrapper RTL "
+                "artifact. Estimate-only scheduler contracts must not be used for DCP."
+            )
+        if self._overlapped_scheduler_builtin() == "stream_feedback":
+            return None
+        artifact_path = self._overlapped_scheduler_artifact_path()
+        if artifact_path is None or not artifact_path.is_file():
+            raise RuntimeError(
+                f"{self.onnx_node.name}: overlapped FINNLoop HDL generation requires "
+                f"an existing scheduler wrapper RTL artifact; got {artifact_path}"
+            )
+        if artifact_path.suffix.lower() not in OVERLAPPED_SCHEDULER_WRAPPER_SUFFIXES:
+            allowed = ", ".join(sorted(OVERLAPPED_SCHEDULER_WRAPPER_SUFFIXES))
+            raise RuntimeError(
+                f"{self.onnx_node.name}: DCP-ready overlapped FINNLoop HDL generation "
+                f"requires a Verilog/SystemVerilog wrapper ({allowed}); got "
+                f"{artifact_path}"
+            )
+        wrapper_module = self._loop_wrapper_module_name()
+        text = artifact_path.read_text()
+        if re.search(rf"\bmodule\s+{re.escape(wrapper_module)}\b", text) is None:
+            raise RuntimeError(
+                f"{self.onnx_node.name}: overlapped scheduler wrapper {artifact_path} "
+                f"must define module {wrapper_module}"
+            )
+        return artifact_path
+
+    def _write_overlapped_scheduler_wrapper(self):
+        artifact_path = self._overlapped_scheduler_wrapper_source()
+        if artifact_path is None:
+            return False
+        wrapper_path = self._loop_wrapper_source_path()
+        wrapper_path.parent.mkdir(parents=True, exist_ok=True)
+        if artifact_path.resolve() != wrapper_path.resolve():
+            shutil.copyfile(artifact_path, wrapper_path)
+        return True
+
+    def _overlapped_exp_cycles(self):
+        if self.get_nodeattr("loop_scheduler_mode") != "overlapped":
+            return None
+        body_ii_cycles = int(self.get_nodeattr("overlapped_body_ii_cycles"))
+        if body_ii_cycles <= 0:
+            raise RuntimeError(
+                f"{self.onnx_node.name}: overlapped FINNLoop scheduling requires "
+                "overlapped_body_ii_cycles > 0"
+            )
+        artifact_path = self._overlapped_scheduler_artifact_path()
+        if not self._overlapped_scheduler_artifact_ready():
+            allowed = ", ".join(sorted(OVERLAPPED_SCHEDULER_ARTIFACT_SUFFIXES))
+            allowed = allowed + ", " + ", ".join(sorted(OVERLAPPED_SCHEDULER_BUILTINS))
+            raise RuntimeError(
+                f"{self.onnx_node.name}: overlapped FINNLoop scheduling requires an "
+                f"existing graph/RTL artifact ({allowed}); got "
+                f"{artifact_path if artifact_path is not None else 'missing'}"
+            )
+        iteration = self.get_nodeattr("iteration")
+        return (body_ii_cycles + self._loop_overhead_per_iter()) * iteration
 
     def get_nodeattr(self, name):
         """Get a node attribute by name. Data is stored inside the ONNX node's
@@ -143,64 +386,63 @@ class FINNLoop(HWCustomOp, RTLBackend):
         except KeyError:
             raise AttributeError("Op has no such attribute: " + name)
 
-    def get_normal_input_shape(self, ind=0):
+    def _body_input_endpoint(self, ind):
         loop_body = self.get_nodeattr("body")
-        if ind == 0:
-            # get first node in loop body and return
-            # normal input shape
-            node = loop_body.graph.node[0]
-            if is_custom_op(node.domain):
-                inst = getHWCustomOp(node)  # No model context: read only
-                ishape = inst.get_normal_input_shape(0)
-            else:
-                ishape = loop_body.get_tensor_shape(node.input[0])
+        tensor = loop_body.graph.input[ind].name
+        consumer = loop_body.find_consumer(tensor)
+        if consumer is None:
+            return loop_body, tensor, None, None
+        return loop_body, tensor, consumer, list(consumer.input).index(tensor)
+
+    def _body_output_endpoint(self, ind):
+        loop_body = self.get_nodeattr("body")
+        tensor = loop_body.graph.output[ind].name
+        producer = loop_body.find_producer(tensor)
+        if producer is None:
+            return loop_body, tensor, None, None
+        return loop_body, tensor, producer, list(producer.output).index(tensor)
+
+    def get_normal_input_shape(self, ind=0):
+        loop_body, tensor, node, node_input_ind = self._body_input_endpoint(ind)
+        if node is None:
+            ishape = loop_body.get_tensor_shape(tensor)
+        elif is_custom_op(node.domain):
+            inst = getHWCustomOp(node)  # No model context: read only
+            ishape = inst.get_normal_input_shape(node_input_ind)
         else:
-            loop_body = self.get_nodeattr("body")
-            tensor = loop_body.graph.input[ind].name
-            # get consumer, assuming the second input is the parameter input
-            param_node = loop_body.find_consumer(tensor)
-            if is_custom_op(param_node.domain):
-                inst = getHWCustomOp(param_node)  # No model context: read only
-                ishape = inst.get_normal_input_shape(1)
-            else:
-                ishape = loop_body.get_tensor_shape(tensor)
+            ishape = loop_body.get_tensor_shape(tensor)
         return ishape
 
     def get_normal_output_shape(self, ind=0):
-        loop_body = self.get_nodeattr("body")
-        # get last node in loop body and return
-        # normal output shape
-        node = loop_body.graph.node[-1]
-        if is_custom_op(node.domain):
+        loop_body, tensor, node, node_output_ind = self._body_output_endpoint(ind)
+        if node is None:
+            oshape = loop_body.get_tensor_shape(tensor)
+        elif is_custom_op(node.domain):
             inst = getHWCustomOp(node)  # No model context: read only
-            oshape = inst.get_normal_output_shape(0)
+            oshape = inst.get_normal_output_shape(node_output_ind)
         else:
-            oshape = loop_body.get_tensor_shape(node.output[0])
+            oshape = loop_body.get_tensor_shape(tensor)
         return oshape
 
     def get_folded_input_shape(self, ind=0):
-        loop_body = self.get_nodeattr("body")
-        if ind == 0:
-            # get first node in loop body and return
-            # normal input shape
-            node = loop_body.graph.node[0]
+        loop_body, tensor, node, node_input_ind = self._body_input_endpoint(ind)
+        if node is None:
+            ishape = loop_body.get_tensor_shape(tensor)
+        elif is_custom_op(node.domain):
             inst = getHWCustomOp(node)  # No model context: read only
-            ishape = inst.get_folded_input_shape(0)
+            ishape = inst.get_folded_input_shape(node_input_ind)
         else:
-            tensor = loop_body.graph.input[ind].name
-            # get consumer, assuming the second input is the parameter input
-            param_node = loop_body.find_consumer(tensor)
-            inst = getHWCustomOp(param_node)  # No model context: read only
-            ishape = inst.get_folded_input_shape(1)
+            ishape = loop_body.get_tensor_shape(tensor)
         return ishape
 
     def get_folded_output_shape(self, ind=0):
-        loop_body = self.get_nodeattr("body")
-        # get last node in loop body and return
-        # normal output shape
-        node = loop_body.graph.node[-1]
-        inst = getHWCustomOp(node)  # No model context: read only
-        return inst.get_folded_output_shape(0)
+        loop_body, tensor, node, node_output_ind = self._body_output_endpoint(ind)
+        if node is None:
+            return loop_body.get_tensor_shape(tensor)
+        if is_custom_op(node.domain):
+            inst = getHWCustomOp(node)  # No model context: read only
+            return inst.get_folded_output_shape(node_output_ind)
+        return loop_body.get_tensor_shape(tensor)
 
     def infer_node_datatype(self, model):
         pass
@@ -210,13 +452,10 @@ class FINNLoop(HWCustomOp, RTLBackend):
         if ind == 0:
             idt = DataType[self.get_nodeattr("inputDataType")]
         else:
-            loop_body = self.get_nodeattr("body")
-            tensor = loop_body.graph.input[ind].name
-            # get consumer, assuming the second input is the parameter input
-            param_node = loop_body.find_consumer(tensor)
-            if is_custom_op(param_node.domain):
-                inst = getHWCustomOp(param_node)  # No model context: read only
-                idt = inst.get_input_datatype(1)
+            loop_body, tensor, node, node_input_ind = self._body_input_endpoint(ind)
+            if node is not None and is_custom_op(node.domain):
+                inst = getHWCustomOp(node)  # No model context: read only
+                idt = inst.get_input_datatype(node_input_ind)
             else:
                 idt = loop_body.get_tensor_datatype(tensor)
         return idt
@@ -226,53 +465,42 @@ class FINNLoop(HWCustomOp, RTLBackend):
         return odt
 
     def get_instream_width(self, ind=0):
-        loop_body = self.get_nodeattr("body")
-        if ind == 0:
-            # get first node in loop body and return
-            # normal input shape
-            node = loop_body.graph.node[0]
+        loop_body, tensor, node, node_input_ind = self._body_input_endpoint(ind)
+        if node is not None and is_custom_op(node.domain):
             inst = getHWCustomOp(node)  # No model context: read only
-            iwidth = inst.get_instream_width(0)
+            iwidth = inst.get_instream_width(node_input_ind)
         else:
-            tensor = loop_body.graph.input[ind].name
-            # get consumer, assuming the second input is the parameter input
-            param_node = loop_body.find_consumer(tensor)
-            inst = getHWCustomOp(param_node)  # No model context: read only
-            iwidth = inst.get_instream_width(1)
+            iwidth = loop_body.get_tensor_datatype(tensor).bitwidth()
         return iwidth
 
     def get_exp_cycles(self):
-        loop_body = self.get_nodeattr("body")
-        check_if_cycles_annotated = False
+        overlapped_cycles = self._overlapped_exp_cycles()
+        if overlapped_cycles is not None:
+            return overlapped_cycles
 
-        for node in loop_body.graph.node:
-            cnode = getHWCustomOp(node)  # No model context: read only
-            if cnode.get_nodeattr("cycles_estimate"):
-                check_if_cycles_annotated = True
-                break
-        if not check_if_cycles_annotated:
-            loop_body = loop_body.transform(AnnotateCycles())
+        loop_body = self.get_nodeattr("body")
+        loop_body = loop_body.transform(AnnotateCycles())
+        self.set_nodeattr("body", loop_body.graph)
 
         iteration = self.get_nodeattr("iteration")
         body_cycles = loop_body.analysis(dataflow_performance)["critical_path_cycles"]
-        overhead_per_iter = 40
-        return (body_cycles + overhead_per_iter) * iteration
+        return (body_cycles + self._loop_overhead_per_iter()) * iteration
 
     def get_outstream_width(self, ind=0):
-        loop_body = self.get_nodeattr("body")
-        # get last node in loop body and return
-        # normal output shape
-        node = loop_body.graph.node[-1]
-        inst = getHWCustomOp(node)  # No model context: read only
-        return inst.get_outstream_width(0)
+        loop_body, tensor, node, node_output_ind = self._body_output_endpoint(ind)
+        if node is not None and is_custom_op(node.domain):
+            inst = getHWCustomOp(node)  # No model context: read only
+            return inst.get_outstream_width(node_output_ind)
+        return loop_body.get_tensor_datatype(tensor).bitwidth()
 
     def get_number_output_values(self):
-        loop_body = self.get_nodeattr("body")
-        # get last node in loop body and return
-        # normal output values
-        node = loop_body.graph.node[-1]
-        inst = getHWCustomOp(node)  # No model context: read only
-        return inst.get_number_output_values()
+        loop_body, tensor, node, node_output_ind = self._body_output_endpoint(0)
+        if node is not None and is_custom_op(node.domain):
+            inst = getHWCustomOp(node)  # No model context: read only
+            if node_output_ind == 0:
+                return inst.get_number_output_values()
+            return int(np.prod(inst.get_folded_output_shape(node_output_ind)[:-1]))
+        return int(np.prod(loop_body.get_tensor_shape(tensor)))
 
     def prepare_rtlsim(self, behav=False):
         """Creates a xsi emulation library for the RTL code generated
@@ -338,12 +566,15 @@ class FINNLoop(HWCustomOp, RTLBackend):
                 iteration_context_path is not None and iteration_context_path != ""
             )
             all_iteration_contexts = {}
+            dynamic_loop_inputs = self._dynamic_loop_inputs()
             for i_iter in range(iteration):
                 # set the right parameters
                 input_dict = {}
                 for i, inp in enumerate(node.input):
                     if i == 0:
                         input_dict[loop_body.graph.input[i].name] = inp_values
+                    elif i in dynamic_loop_inputs:
+                        input_dict[loop_body.graph.input[i].name] = context[node.input[i]]
                     else:
                         params = context[node.input[i]]
                         input_dict[loop_body.graph.input[i].name] = params[i_iter]
@@ -365,10 +596,15 @@ class FINNLoop(HWCustomOp, RTLBackend):
     def generate_hdl(self, model, fpgapart, clk):
         # Generate params as part of IP preparation
         code_gen_dir = self.get_nodeattr("code_gen_dir_ipgen")
+        self.set_nodeattr("clk_ns", float(clk))
+        self._overlapped_scheduler_wrapper_source()
         self.generate_hdl_stream_tap()
+        self.generate_hdl_dynamic_replay()
         self.generate_params(model, code_gen_dir)
+        if self._write_overlapped_scheduler_wrapper():
+            return
         code_gen_dict = {}
-        code_gen_dict["$LOOP_CONTROL_WRAPPER_NAME$"] = [f"{self.onnx_node.name}_loop_cont_wrapper"]
+        code_gen_dict["$LOOP_CONTROL_WRAPPER_NAME$"] = [self._loop_wrapper_module_name()]
         code_gen_dict["$N_MAX_LAYERS$"] = (str(self.get_nodeattr("iteration")),)
         code_gen_dict["$N_LAYERS$"] = [str(self.get_nodeattr("iteration"))]
         code_gen_dict["$ILEN_BITS$"] = [str(self.get_instream_width(0))]
@@ -390,26 +626,47 @@ class FINNLoop(HWCustomOp, RTLBackend):
         template_path = os.environ["FINN_ROOT"] + "/finn-rtllib/mlo/loop_control_wrapper.v"
         with open(template_path, "r") as f:
             template_wrapper = f.read()
+        if self._uses_builtin_stream_feedback_scheduler():
+            template_wrapper = template_wrapper.replace(
+                "loop_control #(",
+                "overlapped_loop_control #(",
+            )
         for key, value in code_gen_dict.items():
             # transform list into long string separated by '\n'
             code_gen_line = "\n".join(value)
             template_wrapper = template_wrapper.replace(key, code_gen_line)
-        with open(
-            os.path.join(code_gen_dir, self.onnx_node.name + "_wrapper.v"),
-            "w",
-        ) as f:
+        with open(self._loop_wrapper_source_path(), "w") as f:
             f.write(template_wrapper)
 
     def generate_params(self, model, path):
         iteration = self.get_nodeattr("iteration")
         loop_node = self.onnx_node
         loop_body = self.get_nodeattr("body")
-        for i, inp in enumerate(loop_node.input[1:]):
+        activation_inputs = max(1, len(loop_node.output))
+        dynamic_loop_inputs = self._dynamic_loop_inputs()
+        for loop_input_index in range(activation_inputs, len(loop_node.input)):
+            if loop_input_index in dynamic_loop_inputs:
+                continue
+            inp = loop_node.input[loop_input_index]
             params = model.get_initializer(inp)
+            if params is None:
+                producer = model.find_producer(inp)
+                producer_desc = (
+                    "graph input"
+                    if producer is None
+                    else f"{producer.name or '<unnamed>'}:{producer.op_type}"
+                )
+                raise RuntimeError(
+                    f"{loop_node.name}: FINNLoop input {loop_input_index} ({inp}) is not a "
+                    f"static initializer; producer is {producer_desc}. RTL MLO parameter "
+                    "code generation currently supports only static per-iteration parameter "
+                    "stacks. Dynamic invariant streams must be precomputed/folded before "
+                    "loop codegen or lowered through a dedicated replay/streaming path."
+                )
             param_dtype = model.get_tensor_datatype(inp)
             assert params.shape[0] == iteration
             # get node that initializer is attached to
-            loop_tensor = loop_body.graph.input[i + 1].name
+            loop_tensor = loop_body.graph.input[loop_input_index].name
             param_node = loop_body.find_consumer(loop_tensor)
             for iter in range(iteration):
                 loop_body.set_initializer(loop_tensor, params[iter])
@@ -458,7 +715,9 @@ class FINNLoop(HWCustomOp, RTLBackend):
                 "Elementwise"
             ):
                 # concatinate all .dat files together
-                param_file = "{}/memblock_{}_id_{}.dat".format(path, param_node.op_type, i + 1)
+                param_file = "{}/memblock_{}_id_{}.dat".format(
+                    path, param_node.op_type, loop_input_index
+                )
                 with open(param_file, "w") as outfile:
                     for iter in range(iteration):
                         memblock_file = "{}/{}_memblock_{}.dat".format(
@@ -477,7 +736,9 @@ class FINNLoop(HWCustomOp, RTLBackend):
                         os.remove(npy_file)
                 if npy_parts:
                     combined_npy = np.concatenate(npy_parts, axis=1)
-                    npy_out = "{}/input1_{}_id_{}.npy".format(path, param_node.op_type, i + 1)
+                    npy_out = "{}/input1_{}_id_{}.npy".format(
+                        path, param_node.op_type, loop_input_index
+                    )
                     np.save(npy_out, combined_npy)
                 # Replace the path for the dat files in the ipgen files.
                 # Adapted from transformations.fpgadataflow.replace_verilog_relpaths
@@ -497,7 +758,7 @@ class FINNLoop(HWCustomOp, RTLBackend):
                                     new = "%s/memblock_%s_id_%s.dat" % (
                                         path,
                                         param_node.op_type,
-                                        i + 1,
+                                        loop_input_index,
                                     )
                                     s = s.replace(old, new)
                                     with open(fpath, "w") as f:
@@ -510,7 +771,7 @@ class FINNLoop(HWCustomOp, RTLBackend):
                 for stage in range(o_bitwidth):
                     for pe_value in range(pe):
                         param_file = path + "/Thresholding_id_%s_threshs_%s_%s.dat" % (
-                            i + 1,
+                            loop_input_index,
                             pe_value,
                             stage,
                         )
@@ -548,7 +809,7 @@ class FINNLoop(HWCustomOp, RTLBackend):
                                 with open(fpath, "r") as f:
                                     s = f.read()
                                 old = "./%s" % param_node.name
-                                new = "%s/Thresholding_id_%s" % (path, i + 1)
+                                new = "%s/Thresholding_id_%s" % (path, loop_input_index)
                                 s = s.replace(old, new)
                                 with open(fpath, "w") as f:
                                     f.write(s)
@@ -562,6 +823,7 @@ class FINNLoop(HWCustomOp, RTLBackend):
         iteration = self.get_nodeattr("iteration")
         loop_body = self.get_nodeattr("body")
         graph_inputs = [x.name for x in loop_body.graph.input]
+        dynamic_loop_inputs = self._dynamic_loop_inputs()
         # TODO check if this needs to be padded
         data_width = DataType.get_smallest_possible(iteration).bitwidth()
         # pad to nearest multiple of 8
@@ -569,13 +831,20 @@ class FINNLoop(HWCustomOp, RTLBackend):
         for node in loop_body.graph.node:
             node_inst = getHWCustomOp(node)  # No model context: read only
             if node_inst.get_nodeattr("mlo_max_iter"):
+                input_index = graph_inputs.index(node.input[1])
+                if input_index in dynamic_loop_inputs:
+                    continue
                 # calculate TAP_REP
                 # for Thresholds this value is fm size / pe
                 # for all other param nodes it is 1
                 tap_rep = 1
                 if node.op_type == "Thresholding_rtl":
                     tap_rep = np.prod(node_inst.get_folded_input_shape(0)[:-1])
-                stname = "IN_%s" % graph_inputs.index(node.input[1])
+                elif node.op_type.startswith("Elementwise") and hasattr(
+                    node_inst, "calc_wmem_reps"
+                ):
+                    tap_rep = node_inst.calc_wmem_reps()
+                stname = "IN_%s" % input_index
                 code_gen_dict = {
                     "$MODULE_NAME$": [stname],
                     "$DATA_WIDTH$": [str(data_width)],
@@ -594,21 +863,72 @@ class FINNLoop(HWCustomOp, RTLBackend):
                 ) as f:
                     f.write(template_wrapper)
 
-    def ipgen_singlenode_code(self, fpgapart=None):
-        prjname = "MakeLoopIP"
-        block_name = self.onnx_node.name
-        vivado_stitch_proj_dir = self.get_nodeattr("code_gen_dir_ipgen")
+    def generate_hdl_dynamic_replay(self):
+        """Generate wrappers for dynamic loop-invariant replay streams."""
 
-        cmd = []
+        code_gen_dir = self.get_nodeattr("code_gen_dir_ipgen")
+        iteration = self.get_nodeattr("iteration")
+        for input_index in sorted(self._dynamic_loop_inputs()):
+            if input_index == 0:
+                raise RuntimeError(f"{self.onnx_node.name}: activation input cannot be replayed")
+            data_width = self.get_instream_width_padded(input_index)
+            frame_words = int(np.prod(self.get_folded_input_shape(input_index)[:-1]))
+            if data_width <= 0 or frame_words <= 0:
+                raise RuntimeError(
+                    f"{self.onnx_node.name}: invalid dynamic replay input {input_index} "
+                    f"width={data_width} frame_words={frame_words}"
+                )
+            module_name = f"IN_{input_index}_stream_replay_wrapper"
+            wrapper = f"""\
+module {module_name} #(
+    parameter DATA_WIDTH = {data_width},
+    parameter FRAME_WORDS = {frame_words},
+    parameter REPS = {iteration}
+)(
+    (* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF s_axis_0:m_axis_0, ASSOCIATED_RESET ap_rst_n" *)
+    (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 ap_clk CLK" *)
+    input ap_clk,
+    (* X_INTERFACE_PARAMETER = "POLARITY ACTIVE_LOW" *)
+    input ap_rst_n,
 
-        # Create Vivado axis_dwidth_converter IPs for intermediate_frames DWCs
+    input [DATA_WIDTH-1:0] s_axis_0_TDATA,
+    input s_axis_0_TVALID,
+    output s_axis_0_TREADY,
+
+    output [DATA_WIDTH-1:0] m_axis_0_TDATA,
+    output m_axis_0_TVALID,
+    input m_axis_0_TREADY
+);
+
+    stream_replay #(
+        .DATA_WIDTH(DATA_WIDTH),
+        .FRAME_WORDS(FRAME_WORDS),
+        .REPS(REPS)
+    ) inst (
+        .clk(ap_clk),
+        .rst(!ap_rst_n),
+        .s_axis_0_TDATA(s_axis_0_TDATA),
+        .s_axis_0_TVALID(s_axis_0_TVALID),
+        .s_axis_0_TREADY(s_axis_0_TREADY),
+        .m_axis_0_TDATA(m_axis_0_TDATA),
+        .m_axis_0_TVALID(m_axis_0_TVALID),
+        .m_axis_0_TREADY(m_axis_0_TREADY)
+    );
+
+endmodule
+"""
+            with open(os.path.join(code_gen_dir, module_name + ".v"), "w") as f:
+                f.write(wrapper)
+
+    def _intermediate_frame_dwc_ipgen_cmds(self):
         olen_bits = self.get_outstream_width(0)
         ilen_bits = self.get_instream_width(0)
         data_bits = 256
+
         # DWC write path: body output width -> DMA width (256)
         dwc_sink_s_bytes = (olen_bits + 7) // 8
         dwc_sink_m_bytes = data_bits // 8
-        cmd += [
+        cmd = [
             "create_ip -name axis_dwidth_converter -vendor xilinx.com "
             "-library ip -version 1.1 -module_name if_dwc_sink",
             "set_property -dict [list "
@@ -619,6 +939,7 @@ class FINNLoop(HWCustomOp, RTLBackend):
             "] [get_ips if_dwc_sink]" % (dwc_sink_s_bytes, dwc_sink_m_bytes),
             "generate_target all [get_ips if_dwc_sink]",
         ]
+
         # DWC read path: DMA width (256) -> body input width
         dwc_source_s_bytes = data_bits // 8
         dwc_source_m_bytes = (ilen_bits + 7) // 8
@@ -634,6 +955,38 @@ class FINNLoop(HWCustomOp, RTLBackend):
             "generate_target all [get_ips if_dwc_source]",
         ]
 
+        if self._uses_builtin_stream_feedback_scheduler():
+            cmd += [
+                "create_ip -name axis_dwidth_converter -vendor xilinx.com "
+                "-library ip -version 1.1 -module_name if_dwc_feedback",
+                "set_property -dict [list "
+                "CONFIG.S_TDATA_NUM_BYTES {%d} "
+                "CONFIG.M_TDATA_NUM_BYTES {%d} "
+                "CONFIG.HAS_TLAST {1} "
+                "CONFIG.HAS_TKEEP {1} "
+                "] [get_ips if_dwc_feedback]" % (dwc_sink_s_bytes, dwc_source_m_bytes),
+                "generate_target all [get_ips if_dwc_feedback]",
+            ]
+        return cmd
+
+    def _loop_shell_source_ipgen_cmds(self):
+        if not self._uses_builtin_stream_feedback_scheduler():
+            return []
+        return [
+            'add_files -norecurse "$::env(FINN_ROOT)/finn-rtllib/mlo/overlapped_loop_control.sv"',
+            'add_files -norecurse "$::env(FINN_ROOT)/finn-rtllib/mlo/infrastructure/streamed_feedback_frames.sv"',
+        ]
+
+    def ipgen_singlenode_code(self, fpgapart=None):
+        prjname = "MakeLoopIP"
+        block_name = self.onnx_node.name
+        vivado_stitch_proj_dir = self.get_nodeattr("code_gen_dir_ipgen")
+
+        cmd = []
+
+        # Create Vivado axis_dwidth_converter IPs for intermediate_frames DWCs
+        cmd += self._intermediate_frame_dwc_ipgen_cmds()
+
         # add all the generated IP dirs to ip_repo_paths
         ip_dirs = ["list"]
         # add RTL streamer IP
@@ -644,8 +997,9 @@ class FINNLoop(HWCustomOp, RTLBackend):
             ip_dir_value = node_inst.get_nodeattr("ip_path")
             assert os.path.isdir(ip_dir_value), "IP generation directory doesn't exist."
             ip_dirs += [ip_dir_value]
-        ip_dirs_str = " ".join(ip_dirs)
-        cmd.append("set_property ip_repo_paths [%s] [current_project]" % ip_dirs_str)
+        loop_body_intf_names = eval(loop_model.get_metadata_prop("vivado_stitch_ifnames"))
+        body_clk2x_names = loop_body_intf_names.get("clk2x", [])
+        cmd.append(_ip_repo_paths_set_cmd(ip_dirs, collapse_generated=False))
         cmd.append("update_ip_catalog")
 
         # create and instantiate FINNLoop node overarching block design
@@ -653,8 +1007,15 @@ class FINNLoop(HWCustomOp, RTLBackend):
         cmd.append("create_bd_cell -type hier %s" % (self.onnx_node.name))
         clk_name = self.get_verilog_top_module_intf_names()["clk"][0]
         rst_name = self.get_verilog_top_module_intf_names()["rst"][0]
+        clk2x_name = None
+        if body_clk2x_names:
+            clk2x_name = self.get_verilog_top_module_intf_names()["clk2x"][0]
         # clock and reset
         cmd.append("create_bd_pin -dir I -type clk /%s/%s" % (self.onnx_node.name, clk_name))
+        if clk2x_name is not None:
+            cmd.append(
+                "create_bd_pin -dir I -type clk /%s/%s" % (self.onnx_node.name, clk2x_name)
+            )
         cmd.append("create_bd_pin -dir I -type rst /%s/%s" % (self.onnx_node.name, rst_name))
         # interfaces
         node_intf = self.get_verilog_top_module_intf_names()
@@ -686,6 +1047,7 @@ class FINNLoop(HWCustomOp, RTLBackend):
 
         # instantiate loop shell
         loop_shell_name = f"{self.onnx_node.name}/{self.onnx_node.name}_loop_cont_wrapper"
+        cmd += self._loop_shell_source_ipgen_cmds()
         cmd.append(
             f"""create_bd_cell -type module -reference \
             {self.onnx_node.name}_loop_cont_wrapper {loop_shell_name}"""
@@ -715,6 +1077,7 @@ class FINNLoop(HWCustomOp, RTLBackend):
 
         # stream tap graph generation
         loop_body = self.get_nodeattr("body")
+        dynamic_loop_inputs = self._dynamic_loop_inputs()
         source_target = "./ip/verilog/rtl_ops/%s" % self.onnx_node.name
         cmd.append("file mkdir %s" % source_target)
         code_gen_dir = self.get_nodeattr("code_gen_dir_ipgen")
@@ -741,25 +1104,42 @@ class FINNLoop(HWCustomOp, RTLBackend):
             "create_bd_intf_pin -mode Slave "
             "-vlnv xilinx.com:interface:axis_rtl:1.0 /%s/s_axis_0" % bd_name
         )
-        for id, inp in enumerate(loop_body.graph.input[1:]):
+        for input_index, inp in enumerate(loop_body.graph.input[1:], start=1):
+            if input_index in dynamic_loop_inputs:
+                cmd.append(
+                    "create_bd_intf_pin -mode Slave "
+                    "-vlnv xilinx.com:interface:axis_rtl:1.0 /%s/s_axis_%d"
+                    % (bd_name, input_index)
+                )
+                continue
             cmd.append(
                 "create_bd_intf_pin -mode Master "
-                "-vlnv xilinx.com:interface:axis_rtl:1.0 /%s/m_axis_%d" % (bd_name, id + 1)
+                "-vlnv xilinx.com:interface:axis_rtl:1.0 /%s/m_axis_%d"
+                % (bd_name, input_index)
             )
         # get stream tap (+ skid)  components
         skid_file = os.path.join(os.environ["FINN_ROOT"], "finn-rtllib/skid/skid.sv")
         stream_tap_dir = os.path.join(os.environ["FINN_ROOT"], "finn-rtllib/stream_tap/hdl/")
+        stream_replay_file = os.path.join(
+            os.environ["FINN_ROOT"], "finn-rtllib/stream_replay/hdl/stream_replay.sv"
+        )
         file_suffix = "_stream_tap_wrapper.v"
+        replay_file_suffix = "_stream_replay_wrapper.v"
         # automatically find stream tap verilog components in code generation directory
         st_tmpl_names = []
         st_verilog_files = []
+        replay_verilog_files = []
         for fname in os.listdir(code_gen_dir):
             if fname.endswith(file_suffix):
                 st_verilog_files.append(os.path.join(code_gen_dir, fname))
                 st_tmpl_names.append(fname[:-2])
+            if fname.endswith(replay_file_suffix):
+                replay_verilog_files.append(os.path.join(code_gen_dir, fname))
         sourcefiles = st_verilog_files + [stream_tap_dir + "stream_tap.sv", skid_file]
+        if replay_verilog_files:
+            sourcefiles += replay_verilog_files + [stream_replay_file]
         for f in sourcefiles:
-            cmd += ["add_files -copy_to %s -norecurse %s" % (source_target, f)]
+            cmd += [_add_files_copy_to_cmd(source_target, f)]
 
         adj_list = adjacency_list(
             loop_body,
@@ -776,12 +1156,14 @@ class FINNLoop(HWCustomOp, RTLBackend):
 
         # create map that maps each stream tap to its param node
         st_map = {}
-        for id, inp in enumerate(loop_body.graph.input[1:]):
+        for input_index, inp in enumerate(loop_body.graph.input[1:], start=1):
+            if input_index in dynamic_loop_inputs:
+                continue
             consumer = loop_body.find_consumer(inp.name)
-            st_map[consumer.name] = "IN_%d_stream_tap_wrapper" % (id + 1)
+            st_map[consumer.name] = (input_index, "IN_%d_stream_tap_wrapper" % input_index)
 
         # instantiate all stream taps and connect their clk and rst
-        for id, st_name in enumerate(st_map.values()):
+        for input_index, st_name in st_map.values():
             cmd.append(
                 "create_bd_cell -type hier -reference %s /%s/%s" % (st_name, bd_name, st_name)
             )
@@ -796,7 +1178,29 @@ class FINNLoop(HWCustomOp, RTLBackend):
             )
             cmd.append(
                 "connect_bd_intf_net [get_bd_intf_pins %s/m_axis_%s] "
-                "[get_bd_intf_pins %s/%s/m_axis_1]" % (bd_name, id + 1, bd_name, st_name)
+                "[get_bd_intf_pins %s/%s/m_axis_1]" % (bd_name, input_index, bd_name, st_name)
+            )
+
+        replay_map = {}
+        for input_index in sorted(dynamic_loop_inputs):
+            replay_name = "IN_%d_stream_replay_wrapper" % input_index
+            replay_map[input_index] = replay_name
+            cmd.append(
+                "create_bd_cell -type hier -reference %s /%s/%s"
+                % (replay_name, bd_name, replay_name)
+            )
+            cmd.append(
+                "connect_bd_net [get_bd_pins %s/%s] [get_bd_pins %s/%s/ap_clk]"
+                % (bd_name, clk_name, bd_name, replay_name)
+            )
+            cmd.append(
+                "connect_bd_net [get_bd_pins %s/%s] [get_bd_pins %s/%s/ap_rst_n]"
+                % (bd_name, rst_name, bd_name, replay_name)
+            )
+            cmd.append(
+                "connect_bd_intf_net [get_bd_intf_pins %s/s_axis_%d] "
+                "[get_bd_intf_pins %s/%s/s_axis_0]"
+                % (bd_name, input_index, bd_name, replay_name)
             )
 
         # prune adj_list to remove join duplicates
@@ -850,12 +1254,12 @@ class FINNLoop(HWCustomOp, RTLBackend):
                 src_inst_name = bd_name
                 src_intf_name = "s_axis_0"
             else:
-                src_inst_name = bd_name + "/" + st_map[src]
+                src_inst_name = bd_name + "/" + st_map[src][1]
                 src_intf_name = "m_axis_0"
 
             dst_intf_name = "s_axis_0"
             if len(dsts) == 1:
-                dst_inst_name = st_map[dsts[0]]
+                dst_inst_name = st_map[dsts[0]][1]
                 cmd.append(
                     "connect_bd_intf_net [get_bd_intf_pins %s/%s] "
                     "[get_bd_intf_pins %s/%s/%s]"
@@ -898,7 +1302,7 @@ class FINNLoop(HWCustomOp, RTLBackend):
                         % (src_inst_name, src_inst_name)
                     )
                     for id, dst in enumerate(dsts):
-                        dst_inst_name = st_map[dst]
+                        dst_inst_name = st_map[dst][1]
                         cmd.append(
                             "connect_bd_intf_net "
                             "[get_bd_intf_pins %s/axi_broadcaster_0/M0%s_AXIS] "
@@ -907,7 +1311,7 @@ class FINNLoop(HWCustomOp, RTLBackend):
                         )
                 else:
                     for id, dst in enumerate(dsts):
-                        dst_inst_name = st_map[dst]
+                        dst_inst_name = st_map[dst][1]
                         cmd.append(
                             "connect_bd_net "
                             "[get_bd_pins %s/%s_TDATA] [get_bd_pins %s/%s/%s_TDATA]"
@@ -966,7 +1370,7 @@ class FINNLoop(HWCustomOp, RTLBackend):
                         )
                     )
                     for dst in dsts:
-                        dst_inst_name = st_map[dst]
+                        dst_inst_name = st_map[dst][1]
                         dst_intf_name = "s_axis_0"
                         cmd.append(
                             "connect_bd_net "
@@ -988,7 +1392,7 @@ class FINNLoop(HWCustomOp, RTLBackend):
         ]
         cmd.append(
             "connect_bd_intf_net [get_bd_intf_pins %s/m_axis_0] "
-            "[get_bd_intf_pins %s/%s/m_axis_0]" % (bd_name, bd_name, st_map[last_nodes[0]])
+            "[get_bd_intf_pins %s/%s/m_axis_0]" % (bd_name, bd_name, st_map[last_nodes[0]][1])
         )
 
         # connect stream tap graph to clk and reset
@@ -1006,12 +1410,7 @@ class FINNLoop(HWCustomOp, RTLBackend):
         loop_body_intf_names = eval(loop_body.get_metadata_prop("vivado_stitch_ifnames"))
         ip_dirs = ["list"]
         ip_dirs += collect_ip_dirs(loop_body, loop_body_ipstitch_path)
-        ip_dirs_str = "[%s]" % (" ".join(ip_dirs))
-        cmd.append(
-            "set_property ip_repo_paths "
-            "[concat [get_property ip_repo_paths [current_project]] %s] "
-            "[current_project]" % ip_dirs_str
-        )
+        cmd.append(_ip_repo_paths_set_cmd(ip_dirs, collapse_generated=False))
         cmd.append("update_ip_catalog -rebuild -scan_changes")
         finn_ip_name = f"{self.onnx_node.name}/finn_design_mlo"
         cmd.append("create_bd_cell -type ip -vlnv %s %s" % (loop_body_vlnv, finn_ip_name))
@@ -1024,6 +1423,11 @@ class FINNLoop(HWCustomOp, RTLBackend):
             "connect_bd_net [get_bd_pins %s/%s] [get_bd_pins %s/%s]"
             % (self.onnx_node.name, clk_name, finn_ip_name, clk_name)
         )
+        if clk2x_name is not None:
+            cmd.append(
+                "connect_bd_net [get_bd_pins %s/%s] [get_bd_pins %s/%s]"
+                % (self.onnx_node.name, clk2x_name, finn_ip_name, body_clk2x_names[0])
+            )
         # "externalize" some of the loop shell signals
         ext_signals = loop_body_intf_names["aximm"]
         for sig in ext_signals:
@@ -1034,18 +1438,31 @@ class FINNLoop(HWCustomOp, RTLBackend):
         # connect components with each other
         # stream tap with finn ip
         connect_signals = loop_body_intf_names["s_axis"]
-        for id, sig in enumerate(connect_signals[:-1]):
-            cmd.append(
-                "connect_bd_intf_net "
-                "[get_bd_intf_pins %s/m_axis_%d] [get_bd_intf_pins %s/s_axis_%d]"
-                % (bd_name, id + 1, finn_ip_name, id + 1)
-            )
+        for input_index in range(1, len(connect_signals)):
+            if input_index in dynamic_loop_inputs:
+                cmd.append(
+                    "connect_bd_intf_net "
+                    "[get_bd_intf_pins %s/%s/m_axis_0] [get_bd_intf_pins %s/s_axis_%d]"
+                    % (bd_name, replay_map[input_index], finn_ip_name, input_index)
+                )
+            else:
+                cmd.append(
+                    "connect_bd_intf_net "
+                    "[get_bd_intf_pins %s/m_axis_%d] [get_bd_intf_pins %s/s_axis_%d]"
+                    % (bd_name, input_index, finn_ip_name, input_index)
+                )
         # connect stream tap with loop wrapper
         cmd.append(
             "connect_bd_intf_net "
             "[get_bd_intf_pins %s/s_axis_0] [get_bd_intf_pins %s/m_axis_core_in_fw_idx]"
             % (bd_name, loop_shell_name)
         )
+        for input_index in sorted(dynamic_loop_inputs):
+            cmd.append(
+                "connect_bd_intf_net "
+                "[get_bd_intf_pins %s/in%d_V] [get_bd_intf_pins %s/s_axis_%d]"
+                % (self.onnx_node.name, input_index, bd_name, input_index)
+            )
         # connect loop wrapper with finn ip
         cmd.append(
             "connect_bd_intf_net "
@@ -1060,7 +1477,14 @@ class FINNLoop(HWCustomOp, RTLBackend):
         cmd.append("make_bd_pins_external  [get_bd_cells %s]" % block_name)
         cmd.append("make_bd_intf_pins_external  [get_bd_cells %s]" % block_name)
         cmd.append("set_property name in0_V [get_bd_intf_ports in0_V_0]")
+        for input_index in sorted(dynamic_loop_inputs):
+            cmd.append(
+                "set_property name in%d_V [get_bd_intf_ports in%d_V_0]"
+                % (input_index, input_index)
+            )
         cmd.append("set_property name ap_clk [get_bd_ports ap_clk_0]")
+        if clk2x_name is not None:
+            cmd.append("set_property name ap_clk2x [get_bd_ports ap_clk2x_0]")
         cmd.append("set_property name ap_rst_n [get_bd_ports ap_rst_n_0]")
         cmd.append("set_property name out0_V [get_bd_intf_ports out0_V_0]")
         cmd.append("set_property name m_axi_hbm [get_bd_intf_ports m_axi_hbm_0]")
@@ -1069,6 +1493,11 @@ class FINNLoop(HWCustomOp, RTLBackend):
         ext_signals = loop_body_intf_names["aximm"]
         for sig in ext_signals:
             cmd.append(f"set_property name {sig[0]} [get_bd_intf_ports {sig[0]}_0]")
+        cmd.extend(
+            _bd_clock_freq_hz_cmds(
+                self.get_nodeattr("clk_ns"), has_clk2x=clk2x_name is not None
+            )
+        )
         cmd.append("save_bd_design")
         # cmd.append("validate_bd_design")
         # cmd.append("save_bd_design")
@@ -1117,7 +1546,7 @@ class FINNLoop(HWCustomOp, RTLBackend):
             "-of [ipx::get_bus_interfaces -of [ipx::current_core ]]]"
         )
         example_data_dir = os.environ["FINN_ROOT"] + "/src/finn/qnn-data/mdd-data"
-        shutil.copytree(example_data_dir, vivado_stitch_proj_dir + "/data")
+        shutil.copytree(example_data_dir, vivado_stitch_proj_dir + "/data", dirs_exist_ok=True)
 
         template = templates.ip_gen_loop_op
 
@@ -1129,7 +1558,7 @@ class FINNLoop(HWCustomOp, RTLBackend):
         template = template.replace("@FPGAPART@", fpgapart)
         template = template.replace(
             "@TOP_VERILOG_FILE@",
-            f"{self.get_nodeattr('code_gen_dir_ipgen')}/{self.onnx_node.name}_wrapper.v",
+            str(self._loop_wrapper_source_path()),
         )
         f = open(os.path.join(vivado_stitch_proj_dir, "make_loop_ip.tcl"), "w")
         f.write(template)
@@ -1164,6 +1593,10 @@ class FINNLoop(HWCustomOp, RTLBackend):
         # AXI4S slave interface from outside loop to loop control externalize
         # to block diagram interface port and connect to fetch_start component
         intf_names["s_axis"].append(("in0_V", self.get_instream_width_padded(0)))
+        for input_index in sorted(self._dynamic_loop_inputs()):
+            intf_names["s_axis"].append(
+                (f"in{input_index}_V", self.get_instream_width_padded(input_index))
+            )
 
         intf_names["m_axis"] = []
         # AXI4S master interface to drive final loop output externalize
@@ -1184,6 +1617,8 @@ class FINNLoop(HWCustomOp, RTLBackend):
 
         loop_body = self.get_nodeattr("body")
         loop_body_intf = eval(loop_body.get_metadata_prop("vivado_stitch_ifnames"))
+        if loop_body_intf.get("clk2x", []):
+            intf_names["clk2x"] = ["ap_clk2x"]
         for intf in loop_body_intf["aximm"]:
             intf_names["aximm"].append(intf)
 
@@ -1198,12 +1633,7 @@ class FINNLoop(HWCustomOp, RTLBackend):
         loop_body = self.get_nodeattr("body")
         loop_body_ipstitch_path = loop_body.get_metadata_prop("vivado_stitch_proj")
         ip_dirs += collect_ip_dirs(loop_body, loop_body_ipstitch_path)
-        ip_dirs_str = " ".join(ip_dirs)
-        cmd.append(
-            "set_property ip_repo_paths "
-            "[concat [get_property ip_repo_paths [current_project]] %s] "
-            "[current_project]" % ip_dirs_str
-        )
+        cmd.append(_ip_repo_paths_append_cmd(ip_dirs, collapse_generated=False))
         cmd.append("update_ip_catalog -rebuild -scan_changes")
         cmd.append("create_bd_cell -type ip -vlnv %s %s" % (vlnv, self.onnx_node.name))
         return cmd

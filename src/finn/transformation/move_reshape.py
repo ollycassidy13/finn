@@ -21,10 +21,12 @@ class RemoveCNVtoFCFlatten(Transformation):
                 oshape = model.get_tensor_shape(n.output[0])
                 if len(oshape) == 2 and ishape[0] == oshape[0]:
                     producer = model.find_producer(n.input[0])
+                    if producer is None:
+                        continue
                     if is_fpgadataflow_node(producer):
                         # standalone flatten, remove
                         consumer = model.find_consumer(n.output[0])
-                        if is_fpgadataflow_node(consumer):
+                        if consumer is not None and is_fpgadataflow_node(consumer):
                             graph_modified = True
                             consumer.input[0] = n.input[0]
                             graph.node.remove(n)
@@ -35,9 +37,9 @@ class RemoveCNVtoFCFlatten(Transformation):
                         perms = list(get_by_name(transp_node.attribute, "perm").ints)
                         if perms == [0, 3, 1, 2]:
                             producer = model.find_producer(transp_node.input[0])
-                            if is_fpgadataflow_node(producer):
+                            if producer is not None and is_fpgadataflow_node(producer):
                                 consumer = model.find_consumer(n.output[0])
-                                if consumer.op_type.startswith("MVAU"):
+                                if consumer is not None and consumer.op_type.startswith("MVAU"):
                                     fc_inst = getHWCustomOp(consumer, model)
                                     mw = fc_inst.get_nodeattr("MW")
                                     mh = fc_inst.get_nodeattr("MH")

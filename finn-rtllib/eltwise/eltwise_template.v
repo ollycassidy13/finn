@@ -34,8 +34,30 @@ wire [$A_CORE_STREAM_BITS$-1:0] in0_core_TDATA;
 wire [$B_CORE_STREAM_BITS$-1:0] in1_core_TDATA;
 wire [$O_CORE_STREAM_BITS$-1:0] out0_core_TDATA;
 
+generate
+if ($A_STREAM_BITS$ < $A_CORE_STREAM_BITS$) begin : gen_broadcast_in0
+        for(genvar i = 0; i < $PE$; i = i + 1) begin : gen_lane
+                assign in0_core_TDATA[(i+1)*$A_WIDTH$-1:i*$A_WIDTH$] =
+                        in0_V_TDATA[$A_WIDTH$-1:0];
+        end
+end
+else begin : gen_direct_in0
 assign in0_core_TDATA = in0_V_TDATA[$A_CORE_STREAM_BITS$-1:0];
+end
+endgenerate
+
+generate
+if ($B_STREAM_BITS$ < $B_CORE_STREAM_BITS$) begin : gen_broadcast_in1
+        for(genvar i = 0; i < $PE$; i = i + 1) begin : gen_lane
+                assign in1_core_TDATA[(i+1)*$B_WIDTH$-1:i*$B_WIDTH$] =
+                        in1_V_TDATA[$B_WIDTH$-1:0];
+        end
+end
+else begin : gen_direct_in1
 assign in1_core_TDATA = in1_V_TDATA[$B_CORE_STREAM_BITS$-1:0];
+end
+endgenerate
+
 assign out0_V_TDATA[$O_CORE_STREAM_BITS$-1:0] = out0_core_TDATA;
 
 generate

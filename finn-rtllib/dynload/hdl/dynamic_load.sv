@@ -36,7 +36,8 @@ module dynamic_load #(
     int unsigned  WEIGHT_WIDTH,
     int unsigned  MH,
     int unsigned  MW,
-    int unsigned  N_REPS
+    int unsigned  N_REPS,
+    parameter     RAM_STYLE = "distributed"
 )(
     input	logic  ap_clk,
     input	logic  ap_rst_n,
@@ -61,7 +62,9 @@ localparam int unsigned  N_TLS = SF*NF;
 localparam int unsigned SIMD_BITS = (SIMD == 1) ? 1 : $clog2(SIMD);
 localparam int unsigned WGT_ADDR_BITS = (N_TLS == 1) ? 1 : $clog2(N_TLS);
 localparam int unsigned RAM_BITS = (WEIGHT_WIDTH + 7)/8 * 8;
-localparam int unsigned WGT_EN_BITS = RAM_BITS / 8;
+localparam int unsigned RAM_BYTES = RAM_BITS / 8;
+localparam int unsigned RAM_DATA_BITS = SIMD * RAM_BITS;
+localparam int unsigned RAM_EN_BITS = SIMD * RAM_BYTES;
 localparam int unsigned NF_BITS = (NF == 1) ? 1 : $clog2(NF);
 localparam int unsigned SF_BITS = (SF == 1) ? 1 : $clog2(SF);
 localparam int unsigned N_TLS_BITS = (N_TLS == 1) ? 1 : $clog2(N_TLS);
@@ -85,9 +88,9 @@ logic[N_TLS_BITS-1:0] curr_sf_C = '0, curr_sf_N;
 logic[SIMD_BITS-1:0] curr_simd_C = '0, curr_simd_N;
 
 // -- Signals
-logic [1:0][PE-1:0][SIMD-1:0][WGT_EN_BITS-1:0] a_we; // Bank enables
+logic [1:0][PE-1:0][RAM_EN_BITS-1:0] a_we; // Bank byte enables
 logic [1:0][WGT_ADDR_BITS-1:0] a_addr;
-logic [1:0][PE-1:0][SIMD-1:0][WEIGHT_WIDTH-1:0] a_data_in;
+logic [1:0][PE-1:0][RAM_DATA_BITS-1:0] a_data_in;
 
 // -- Offsets
 for(genvar i = 0; i < NF; i++) begin
@@ -147,11 +150,12 @@ always_comb begin : DP_PROC_WR
 
     // Buffers
     a_we = '0;
+    a_data_in = '0;
     for(int i = 0; i < 2; i++) begin
         a_addr[i] = offsets[curr_nf_C] + curr_sf_C;
         for(int j = 0; j < PE; j++)
             for(int k = 0; k < SIMD; k++)
-                a_data_in[i][j][k] = idat[j];
+                a_data_in[i][j][(k*RAM_BITS)+:WEIGHT_WIDTH] = idat[j];
     end
 
     // Write and count
@@ -164,9 +168,9 @@ always_comb begin : DP_PROC_WR
                     for(int j = 0; j < SIMD; j++) begin
                         if(curr_simd_C == j) begin
                             if(state_wr_C == ST_WR_0)
-                                a_we[0][i][j] = '1;
+                                a_we[0][i][(j*RAM_BYTES)+:RAM_BYTES] = '1;
                             else
-                                a_we[1][i][j] = '1;
+                                a_we[1][i][(j*RAM_BYTES)+:RAM_BYTES] = '1;
                         end
                     end
                 end
@@ -197,6 +201,7 @@ logic [PE-1:0][SIMD-1:0][WEIGHT_WIDTH-1:0] odat_C = '0, odat_N;
 // -- Signals
 logic [1:0][WGT_ADDR_BITS-1:0] b_addr;
 logic [1:0][PE-1:0][SIMD-1:0][WEIGHT_WIDTH-1:0] odat_ram;
+logic [1:0][PE-1:0][RAM_DATA_BITS-1:0] odat_ram_packed;
 
 // -- REG
 always_ff @( posedge ap_clk ) begin : REG_PROC_RD
@@ -301,20 +306,23 @@ assign odat = odat_C;
 for(genvar i = 0; i < 2; i++) begin
     for(genvar j = 0; j < PE; j++) begin
         for(genvar k = 0; k < SIMD; k++) begin
+            assign odat_ram[i][j][k] = odat_ram_packed[i][j][(k*RAM_BITS)+:WEIGHT_WIDTH];
+        end
+        begin : genPackedRam
             ram_p_c #(
                 .ADDR_BITS(WGT_ADDR_BITS),
-                .DATA_BITS(RAM_BITS),
-                .RAM_STYLE("distributed")
+                .DATA_BITS(RAM_DATA_BITS),
+                .RAM_STYLE(RAM_STYLE)
             ) inst_ram_tp_c (
                 .clk(ap_clk),
                 .a_en(1'b1),
-                .a_we(a_we[i][j][k]),
+                .a_we(a_we[i][j]),
                 .a_addr(a_addr[i]),
                 .b_en(ordy),
                 .b_addr(b_addr[i]),
-                .a_data_in(a_data_in[i][j][k]),
+                .a_data_in(a_data_in[i][j]),
                 .a_data_out(),
-                .b_data_out(odat_ram[i][j][k])
+                .b_data_out(odat_ram_packed[i][j])
             );
         end
     end

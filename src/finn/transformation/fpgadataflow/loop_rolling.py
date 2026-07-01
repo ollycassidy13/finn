@@ -32,10 +32,13 @@ def get_constant_from_value(value):
     Get the constant value of a tensor.
     """
     # Handle input and/or inititalizer values
-    if value.producer() is None:
+    if value.producer() is None and value.const_value is not None:
         return value.const_value.numpy()
-    elif value.producer().op_type == "Constant":
-        return value.producer().attributes["value"].value.numpy()
+    elif value.producer() is not None and value.producer().op_type == "Constant":
+        constant_value = value.producer().attributes["value"].value
+        if constant_value is not None:
+            return constant_value.numpy()
+    return None
 
 
 def same_values(inputs):
@@ -46,9 +49,12 @@ def same_values(inputs):
         return False
 
     first_value = get_constant_from_value(inputs[0])
+    if first_value is None:
+        return False
 
     for inp in inputs[1:]:
-        if not np.array_equal(first_value, get_constant_from_value(inp)):
+        inp_value = get_constant_from_value(inp)
+        if inp_value is None or not np.array_equal(first_value, inp_value):
             return False
 
     return True
@@ -464,9 +470,10 @@ class LoopBodyTemplate:
 class LoopRolling(Transformation):
     """Boilerplate Transformation for loop rolling in fpgadataflow."""
 
-    def __init__(self, loop_body_template):
+    def __init__(self, loop_body_template, fold_constants=True):
         super().__init__()
         self.loop_body_template = loop_body_template
+        self.fold_constants = fold_constants
 
     def apply(self, model: ModelWrapper) -> Tuple[ModelWrapper, bool]:
         model_ir = onnxscript.ir.serde.deserialize_model(model.model)
@@ -542,11 +549,13 @@ class LoopRolling(Transformation):
                 cinput = node.inputs[index]
                 inputs.append(cinput)
 
-            if osh.same(inputs) or same_values(inputs):
+            if same_values(inputs):
                 # Constant with Respect to Loop
                 LoopBody.signature[index] = LoopBodyInputType.CONSTANT
             else:
-                # Must be Indexed
+                # Indexed input. This also covers loop-invariant dynamic inputs:
+                # they are same-valued across iterations, but not compile-time
+                # constants and must not be pushed into the loop body.
                 LoopBody.signature[index] = LoopBodyInputType.PARAMETER
 
         ###################################################
@@ -590,6 +599,9 @@ class LoopRolling(Transformation):
                     pass
             getHWCustomOp(loop_node).set_nodeattr("body", loop_body.graph)
 
-        model = model_wrapper.transform(FoldConstants(), apply_to_subgraphs=True)
+        if self.fold_constants:
+            model = model_wrapper.transform(FoldConstants(), apply_to_subgraphs=True)
+        else:
+            model = model_wrapper
 
         return (model, False)

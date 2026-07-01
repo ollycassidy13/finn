@@ -151,7 +151,7 @@ class MVAU_hls(MVAU, HLSBackend):
                     if Ultrascale device is targeted."""
             self.generate_hdl_memstream(fpgapart, pumped_memory=self.get_nodeattr("pumpedMemory"))
         elif mem_mode == "external_mem":
-            self.generate_hdl_fetch_weights(fpgapart)
+            self.generate_hdl_fetch_weights()
 
     def get_template_param_values(self):
         """Returns the template parameter values according to input, output and weight
@@ -197,9 +197,14 @@ class MVAU_hls(MVAU, HLSBackend):
         self.code_gen_dict["$GLOBALS$"] += ['#include "activations.hpp"']
 
         mem_mode = self.get_nodeattr("mem_mode")
-        if mem_mode not in ["internal_embedded", "internal_decoupled", "external"]:
+        if mem_mode not in [
+            "internal_embedded",
+            "internal_decoupled",
+            "external",
+            "external_mem",
+        ]:
             raise Exception(
-                """Please set mem_mode to "internal_embedded", "internal_decoupled", or "external",
+                """Please set mem_mode to "internal_embedded", "internal_decoupled", "external", or "external_mem",
                 currently no other parameter value is supported!"""
             )
         self.code_gen_dict["$GLOBALS$"] += ['#include "mvau.hpp"']

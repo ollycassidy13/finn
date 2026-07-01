@@ -52,9 +52,10 @@ module fetch_weights #(
     int unsigned              EN_OREG = 1,
     int unsigned              N_DCPL_STGS = 1,
     int unsigned              DBG = 0,
+    parameter                 RAM_STYLE = "block",
 
     // Safely deducible parameters
-    int unsigned              IWSIMD = (TH > 1) ? ((PE*SIMD)/TH) : SIMD,
+    int unsigned              IWSIMD = (TH > 1) ? ((PE*SIMD)/TH) : (PE*SIMD),
     int unsigned              OWSIMD = (PE * SIMD) / TH,
     int unsigned              DS_BITS_BA = (IWSIMD*WEIGHT_WIDTH+7)/8 * 8,
 	int unsigned              WS_BITS_BA = (OWSIMD*WEIGHT_WIDTH+7)/8 * 8,
@@ -128,6 +129,9 @@ module fetch_weights #(
     output logic[WS_BITS_BA-1:0]        m_axis_tdata
 );
 
+localparam bit USE_LOCAL_WEIGHT_BUFFER = (TH == 1) && (DS_BITS_BA != WS_BITS_BA);
+localparam int unsigned DMA_N_REPS = USE_LOCAL_WEIGHT_BUFFER ? 1 : N_REPS;
+
 // Offsets
 logic [N_LAYERS-1:0][ADDR_BITS-1:0] l_offsets;
 for(genvar i = 0; i < N_LAYERS; i++) begin
@@ -143,10 +147,10 @@ logic dma_tready;
 logic [ADDR_BITS-1:0] dma_addr;
 logic [LEN_BITS-1:0] dma_len;
 
-if(TH > 1) begin
+if(DMA_N_REPS > 1) begin
 
     // Consts
-    localparam integer REPS_BITS = (N_REPS == 1) ? 1 : $clog2(N_REPS);
+    localparam integer REPS_BITS = (DMA_N_REPS == 1) ? 1 : $clog2(DMA_N_REPS);
 
     // Reps
     typedef enum logic[0:0]  {ST_IDLE, ST_DMA} state_t;
@@ -194,7 +198,7 @@ if(TH > 1) begin
                 state_N = q_idx_out_tvalid ? ST_DMA : ST_IDLE;
 
             ST_DMA:
-                state_N = (cnt_dma_C == N_REPS-1) && dma_tready ? ST_IDLE : ST_DMA;
+                state_N = (cnt_dma_C == DMA_N_REPS-1) && dma_tready ? ST_IDLE : ST_DMA;
 
         endcase
     end
@@ -286,15 +290,19 @@ logic axis_lwb_tvalid;
 logic axis_lwb_tready;
 logic[WS_BITS_BA-1:0] axis_lwb_tdata;
 
-if(TH == 1) begin
+if(USE_LOCAL_WEIGHT_BUFFER) begin
     local_weight_buffer #(
-        .PE(PE), .SIMD(SIMD), .MH(MH), .MW(MW), .N_REPS(N_REPS), .WEIGHT_WIDTH(WEIGHT_WIDTH), .DBG(DBG)
+        .PE(PE), .SIMD(SIMD), .MH(MH), .MW(MW), .N_REPS(N_REPS),
+        .WEIGHT_WIDTH(WEIGHT_WIDTH), .DBG(DBG), .RAM_STYLE(RAM_STYLE)
     ) inst_weight_buff (
         .clk(aclk), .rst(~aresetn),
         .ivld(axis_dwc_tvalid), .irdy(axis_dwc_tready), .idat(axis_dwc_tdata),
         .ovld(axis_lwb_tvalid), .ordy(axis_lwb_tready), .odat(axis_lwb_tdata)
     );
 end else begin
+    // Direct streaming is only used when the DWC stream and compute-side
+    // weight stream have identical widths. Otherwise local_weight_buffer packs
+    // multiple incoming SIMD beats into one PE-wide weight beat.
     assign axis_lwb_tvalid = axis_dwc_tvalid;
     assign axis_dwc_tready = axis_lwb_tready;
     assign axis_lwb_tdata  = axis_dwc_tdata;

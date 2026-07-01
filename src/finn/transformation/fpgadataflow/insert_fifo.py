@@ -62,6 +62,16 @@ def _suitable_folded_shapes(ishape, oshape):
     return matching_stream_width and matching_size
 
 
+def _is_external_memory_weight_input(node, node_inst, input_index):
+    if input_index != 1 or not node.op_type.startswith("MVAU"):
+        return False
+    try:
+        mem_mode = node_inst.get_nodeattr("mem_mode")
+    except Exception:
+        return False
+    return mem_mode == "external_mem"
+
+
 class InsertFIFO(Transformation):
     """Inserting FIFOs in the beginning and end of the graph as well as
     between fpgadataflow nodes.
@@ -119,16 +129,23 @@ class InsertFIFO(Transformation):
                         # check if folded_shape of output of first node and
                         # input of the second node is equal
                         n1 = getHWCustomOp(consumer, model)
+                        idx_inp = None
                         for idx, inp in enumerate(consumer.input):
                             if inp == output_name:
                                 fld_shape_2 = n1.get_folded_input_shape(ind=idx)
                                 idx_inp = idx
-                        assert _suitable_folded_shapes(
-                            fld_shape, fld_shape_2
-                        ), """The
-                        folded output shape of the first node is not the same as the
-                        folded output shape of the second node. A streaming fifo can't
-                        be implemented in between these nodes."""
+                        assert idx_inp is not None, "Malformed model"
+                        if not _suitable_folded_shapes(fld_shape, fld_shape_2):
+                            raise AssertionError(
+                                "Cannot insert StreamingFIFO between "
+                                f"{first_node.name} ({first_node.op_type}) output "
+                                f"{idx_out} tensor {output_name} with folded shape "
+                                f"{tuple(fld_shape)} and normal shape "
+                                f"{tuple(n0.get_normal_output_shape(idx_out))}, and "
+                                f"{consumer.name} ({consumer.op_type}) input {idx_inp} "
+                                f"with folded shape {tuple(fld_shape_2)} and normal "
+                                f"shape {tuple(n1.get_normal_input_shape(idx_inp))}."
+                            )
                         n_shape = n0.get_normal_output_shape()
 
                         # check if outFIFOdepths attribute of first node
@@ -194,6 +211,8 @@ class InsertFIFO(Transformation):
                     n_input = first_node.input[inp_ind]
                     n0 = getHWCustomOp(first_node, model)
                     if n0.get_nodeattr("mlo_max_iter") and inp_ind > 0:
+                        continue
+                    if _is_external_memory_weight_input(first_node, n0, inp_ind):
                         continue
                     # determine fifo node attributes
                     fld_shape = n0.get_folded_input_shape(inp_ind)

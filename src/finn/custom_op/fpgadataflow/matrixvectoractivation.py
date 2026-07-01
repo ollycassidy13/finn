@@ -991,6 +991,26 @@ class MVAU(HWCustomOp):
             self.instantiate_ip(cmd)
             code_gen_dir = self.get_nodeattr("code_gen_dir_ipgen")
 
+            def find_stream_wrapper(file_suffix, regenerate=None):
+                strm_tmpl = None
+                for fname in sorted(os.listdir(code_gen_dir)):
+                    if fname.endswith(file_suffix):
+                        strm_tmpl = fname
+                        break
+                if strm_tmpl is None and regenerate is not None:
+                    regenerate()
+                    for fname in sorted(os.listdir(code_gen_dir)):
+                        if fname.endswith(file_suffix):
+                            strm_tmpl = fname
+                            break
+                if strm_tmpl is None:
+                    files = ", ".join(sorted(os.listdir(code_gen_dir)))
+                    raise RuntimeError(
+                        f"{node_name}: no {file_suffix} found for mem_mode={mem_mode} "
+                        f"in {code_gen_dir}; files: {files}"
+                    )
+                return strm_tmpl
+
             match mem_mode:
                 #
                 # Dynamic loader instantiation
@@ -1009,9 +1029,7 @@ class MVAU(HWCustomOp):
                     )
                     file_suffix = "_dynamic_load_wrapper.v"
                     # automatically find memstream verilog component in code generation directory
-                    for fname in os.listdir(code_gen_dir):
-                        if fname.endswith(file_suffix):
-                            strm_tmpl = fname
+                    strm_tmpl = find_stream_wrapper(file_suffix, self.generate_hdl_dynload)
                     strm_tmpl_name = strm_tmpl[:-2]
                     sourcefiles = [
                         os.path.join(code_gen_dir, strm_tmpl),
@@ -1048,9 +1066,7 @@ class MVAU(HWCustomOp):
                     dma_rtllib_dir = os.path.join(os.environ["FINN_ROOT"], "finn-rtllib/cdma/")
                     file_suffix = "_fetch_weights_wrapper.v"
                     # automatically find memstream verilog component in code generation directory
-                    for fname in os.listdir(code_gen_dir):
-                        if fname.endswith(file_suffix):
-                            strm_tmpl = fname
+                    strm_tmpl = find_stream_wrapper(file_suffix, self.generate_hdl_fetch_weights)
                     strm_tmpl_name = strm_tmpl[:-2]
                     sourcefiles = [
                         os.path.join(code_gen_dir, strm_tmpl),
@@ -1066,22 +1082,33 @@ class MVAU(HWCustomOp):
                     if theight > 1:
                         iwsimd = (self.get_nodeattr("PE") * self.get_nodeattr("SIMD")) // theight
                     else:
-                        iwsimd = self.get_nodeattr("SIMD")
+                        iwsimd = self.get_nodeattr("PE") * self.get_nodeattr("SIMD")
                     ds_bits_ba = ((iwsimd * wdt.bitwidth() + 7) // 8) * 8
                     dwc_ip_name = node_name + "_dwc"
                     s_bytes = 256 // 8
                     m_bytes = ds_bits_ba // 8
-                    cmd += [
-                        "create_ip -name axis_dwidth_converter -vendor xilinx.com "
-                        "-library ip -version 1.1 -module_name %s" % dwc_ip_name,
-                        "set_property -dict [list "
-                        "CONFIG.S_TDATA_NUM_BYTES {%d} "
-                        "CONFIG.M_TDATA_NUM_BYTES {%d} "
-                        "CONFIG.HAS_TLAST {1} "
-                        "CONFIG.HAS_TKEEP {1} "
-                        "] [get_ips %s]" % (s_bytes, m_bytes, dwc_ip_name),
-                        "generate_target all [get_ips %s]" % dwc_ip_name,
-                    ]
+                    if m_bytes > 512:
+                        dwc_rtllib_dir = os.path.join(
+                            os.environ["FINN_ROOT"], "finn-rtllib/dwc/hdl/"
+                        )
+                        sourcefiles += [
+                            dwc_rtllib_dir + "axis_dwc.sv",
+                            dwc_rtllib_dir + "axis_fifo_adapter.sv",
+                            dwc_rtllib_dir + "axis_fifo.v",
+                            dwc_rtllib_dir + "axis_adapter.v",
+                        ]
+                    else:
+                        cmd += [
+                            "create_ip -name axis_dwidth_converter -vendor xilinx.com "
+                            "-library ip -version 1.1 -module_name %s" % dwc_ip_name,
+                            "set_property -dict [list "
+                            "CONFIG.S_TDATA_NUM_BYTES {%d} "
+                            "CONFIG.M_TDATA_NUM_BYTES {%d} "
+                            "CONFIG.HAS_TLAST {1} "
+                            "CONFIG.HAS_TKEEP {1} "
+                            "] [get_ips %s]" % (s_bytes, m_bytes, dwc_ip_name),
+                            "generate_target all [get_ips %s]" % dwc_ip_name,
+                        ]
 
                     # add files from cdma dir
                     for file in os.listdir(dma_rtllib_dir):
@@ -1113,9 +1140,7 @@ class MVAU(HWCustomOp):
                     )
                     file_suffix = "_memstream_wrapper.v"
                     # automatically find memstream verilog component in code generation directory
-                    for fname in os.listdir(code_gen_dir):
-                        if fname.endswith(file_suffix):
-                            strm_tmpl = fname
+                    strm_tmpl = find_stream_wrapper(file_suffix)
                     strm_tmpl_name = strm_tmpl[:-2]
                     sourcefiles = [
                         os.path.join(code_gen_dir, strm_tmpl),
@@ -1155,6 +1180,27 @@ class MVAU(HWCustomOp):
                             "[get_bd_intf_pins %s/%s/%s]"
                             % (node_name, "in_idx0_V", node_name, strm_inst, "in_idx0_V")
                         )
+
+                case "internal_decoupled":
+                    const_inst = f"{strm_inst}_selector_zero"
+                    cmd.append(
+                        "create_bd_cell -type ip -vlnv xilinx.com:ip:xlconstant:1.1 "
+                        "/%s/%s" % (node_name, const_inst)
+                    )
+                    cmd.append(
+                        "set_property -dict [list CONFIG.CONST_WIDTH {1} CONFIG.CONST_VAL {0}] "
+                        "[get_bd_cells %s/%s]" % (node_name, const_inst)
+                    )
+                    cmd.append(
+                        "connect_bd_net [get_bd_pins %s/%s/dout] "
+                        "[get_bd_pins %s/%s/s_axis_0_tvalid]"
+                        % (node_name, const_inst, node_name, strm_inst)
+                    )
+                    cmd.append(
+                        "connect_bd_net [get_bd_pins %s/%s/dout] "
+                        "[get_bd_pins %s/%s/s_axis_0_tdata]"
+                        % (node_name, const_inst, node_name, strm_inst)
+                    )
 
             cmd.append(
                 "connect_bd_intf_net [get_bd_intf_pins %s/%s/%s] "

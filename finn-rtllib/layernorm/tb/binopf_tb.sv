@@ -65,7 +65,7 @@ module binopf_tb;
 			uwire [31:0]  aa = $shortrealtobits(a);
 			uwire [31:0]  bb = $shortrealtobits(b);
 			uwire [31:0]  rr;
-			binopf #(
+			layernorm_binopf #(
 				.OP(CFG.op), .B_SCALE(SCALE),
 				.A_MATCH_OP_DELAY(CFG.delay),
 				.FORCE_BEHAVIORAL(FORCE_BEHAVIORAL)

@@ -42,6 +42,7 @@ module $MODULE_NAME_AXI_WRAPPER$ #(
     parameter   N_REPS = $N_REPS$,
 	parameter	WEIGHT_WIDTH = $WEIGHT_WIDTH$,
     parameter   N_LAYERS = $N_LAYERS$,
+    parameter   RAM_STYLE = $RAM_STYLE$,
 
     parameter   ADDR_BITS = 64,
     parameter   DATA_BITS = 256,
@@ -65,41 +66,75 @@ module $MODULE_NAME_AXI_WRAPPER$ #(
     output wire                                out_done,
 
     // AXI
-    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm" *)
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm ARADDR" *)
     output wire[ADDR_BITS-1:0]                 axi_mm_araddr,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm ARBURST" *)
     output wire[1:0]		                    axi_mm_arburst,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm ARCACHE" *)
     output wire[3:0]		                    axi_mm_arcache,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm ARID" *)
     output wire[1:0]      		                axi_mm_arid,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm ARLEN" *)
     output wire[7:0]		                    axi_mm_arlen,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm ARLOCK" *)
     output wire[0:0]		                    axi_mm_arlock,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm ARPROT" *)
     output wire[2:0]		                    axi_mm_arprot,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm ARSIZE" *)
     output wire[2:0]		                    axi_mm_arsize,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm ARREADY" *)
     input  wire			                    axi_mm_arready,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm ARVALID" *)
     output wire			                    axi_mm_arvalid,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm AWADDR" *)
     output wire[ADDR_BITS-1:0] 	            axi_mm_awaddr,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm AWBURST" *)
     output wire[1:0]		                    axi_mm_awburst,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm AWCACHE" *)
     output wire[3:0]		                    axi_mm_awcache,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm AWID" *)
     output wire[1:0]		                    axi_mm_awid,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm AWLEN" *)
     output wire[7:0]		                    axi_mm_awlen,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm AWLOCK" *)
     output wire[0:0]		                    axi_mm_awlock,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm AWPROT" *)
     output wire[2:0]		                    axi_mm_awprot,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm AWSIZE" *)
     output wire[2:0]		                    axi_mm_awsize,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm AWREADY" *)
     input  wire			                    axi_mm_awready,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm AWVALID" *)
     output wire			                    axi_mm_awvalid,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm RDATA" *)
     input  wire[DATA_BITS-1:0] 	            axi_mm_rdata,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm RID" *)
     input  wire[1:0]      		                axi_mm_rid,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm RLAST" *)
     input  wire			                    axi_mm_rlast,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm RRESP" *)
     input  wire[1:0]		                    axi_mm_rresp,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm RREADY" *)
     output wire 			                    axi_mm_rready,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm RVALID" *)
     input  wire			                    axi_mm_rvalid,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm WDATA" *)
     output wire[DATA_BITS-1:0] 	            axi_mm_wdata,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm WLAST" *)
     output wire			                    axi_mm_wlast,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm WSTRB" *)
     output wire[DATA_BITS/8-1:0] 	            axi_mm_wstrb,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm WREADY" *)
     input  wire			                    axi_mm_wready,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm WVALID" *)
     output wire			                    axi_mm_wvalid,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm BID" *)
     input  wire[1:0]      		                axi_mm_bid,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm BRESP" *)
     input  wire[1:0]		                    axi_mm_bresp,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm BREADY" *)
     output wire			                    axi_mm_bready,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 axi_mm BVALID" *)
     input  wire			                    axi_mm_bvalid,
 
 `ifdef EN_MLO
@@ -138,11 +173,7 @@ wire [(DS_BITS_BA)/8-1:0] axis_dwc_tkeep;
 wire axis_dwc_tlast;
 
 // Width converter
-$DWC_MODULE_NAME$ inst_dwc (
-    .aclk(ap_clk), .aresetn(ap_rst_n),
-    .s_axis_tvalid(axis_dma_tvalid), .s_axis_tready(axis_dma_tready), .s_axis_tdata(axis_dma_tdata), .s_axis_tkeep(axis_dma_tkeep), .s_axis_tlast(axis_dma_tlast),
-    .m_axis_tvalid(axis_dwc_tvalid), .m_axis_tready(axis_dwc_tready), .m_axis_tdata(axis_dwc_tdata), .m_axis_tkeep(axis_dwc_tkeep), .m_axis_tlast(axis_dwc_tlast)
-);
+$DWC_INST$
 
 fetch_weights #(
     .PE(PE), .SIMD(SIMD), .TH(TH),
@@ -151,6 +182,7 @@ fetch_weights #(
     .IWSIMD(IWSIMD), .OWSIMD(WSIMD),
     .ADDR_BITS(ADDR_BITS), .DATA_BITS(DATA_BITS), .LEN_BITS(LEN_BITS), .IDX_BITS(IDX_BITS),
     .N_LAYERS(N_LAYERS),
+    .RAM_STYLE(RAM_STYLE),
 `ifdef EN_MLO
     .EN_MLO(1)
 `else

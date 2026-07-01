@@ -95,7 +95,7 @@ module layernorm #(
 		//-------------------------------------------------------------------
 		// Value bypass Queue
 		uwire vedge_t  bypass;
-		queue #(.DATA_WIDTH(SIMD*32), .ELASTICITY(VALUE_QUEUE_LEN)) bypass_queue (
+		layernorm_queue #(.DATA_WIDTH(SIMD*32), .ELASTICITY(VALUE_QUEUE_LEN)) bypass_queue (
 			.clk, .rst,
 			.idat(vedge[step].dat), .ivld(vedge[step].vld), .irdy(vedge[step].rdy),
 			.odat(bypass     .dat), .ovld(bypass     .vld), .ordy(bypass     .rdy)
@@ -124,7 +124,7 @@ module layernorm #(
 						assign	leaf = '{ vld: avld, dat: adat[i] };
 					end
 					1: /* Var: square to sum */ begin
-						binopf #(.OP("MUL"), .FORCE_BEHAVIORAL(FORCE_BEHAVIORAL)) node (
+						layernorm_binopf #(.OP("MUL"), .FORCE_BEHAVIORAL(FORCE_BEHAVIORAL)) node (
 							.clk, .rst,
 							.a(adat[i]),  .avld(avld),
 							.b(adat[i]),  .bload(1'b1),
@@ -151,7 +151,7 @@ module layernorm #(
 
 				// Adder Tree
 				for(genvar  i = 0; i < SIMD-1; i++) begin : genNodes
-					binopf #(
+					layernorm_binopf #(
 						.OP("ADD"),
 						.A_MATCH_OP_DELAY(EDGE_DELAYS[2*i+2]),
 						.FORCE_BEHAVIORAL(FORCE_BEHAVIORAL)
@@ -226,7 +226,7 @@ module layernorm #(
 			uwire  norm0_rdy;
 			if(1) begin : blkMeanCatcher
 				uwire  norm_rdy;
-				queue #(.DATA_WIDTH(32), .ELASTICITY(STATS_QUEUE_LEN)) catcher (
+				layernorm_queue #(.DATA_WIDTH(32), .ELASTICITY(STATS_QUEUE_LEN)) catcher (
 					.clk, .rst,
 					.idat(norm .dat), .ivld(norm .vld), .irdy(norm_rdy),
 					.odat(norm0.dat), .ovld(norm0.vld), .ordy(norm0_rdy)
@@ -270,7 +270,7 @@ module layernorm #(
 			uwire  rvld;
 			for(genvar  i = 0; i < SIMD; i++) begin : genOps
 				uwire  rvld0;
-				binopf #(.OP(step? "MUL" : "SUB"), .FORCE_BEHAVIORAL(FORCE_BEHAVIORAL)) op (
+				layernorm_binopf #(.OP(step? "MUL" : "SUB"), .FORCE_BEHAVIORAL(FORCE_BEHAVIORAL)) op (
 					.clk, .rst,
 					.a(bypass.dat[i]), .avld(issue),
 					.b(norm0.dat), .bload,
@@ -281,7 +281,7 @@ module layernorm #(
 
 			// Output Queue
 			uwire  rrdy;
-			queue #(.DATA_WIDTH(SIMD * 32), .ELASTICITY(CREDIT)) decouple (
+			layernorm_queue #(.DATA_WIDTH(SIMD * 32), .ELASTICITY(CREDIT)) decouple (
 				.clk, .rst,
 				.idat(rdat), .ivld(rvld), .irdy(rrdy),
 				.odat(vedge[step+1].dat), .ovld(vedge[step+1].vld), .ordy(vedge[step+1].rdy)

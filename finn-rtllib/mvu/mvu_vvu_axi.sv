@@ -146,6 +146,8 @@ module mvu_vvu_axi #(
 
 	//- Unflatten inputs into structured matrices ---------------------------
 	localparam int unsigned  ACT_PE = IS_MVU? 1 : PE;
+	localparam int unsigned  MVU_ACTIVATION_FANOUT = 8;
+	localparam int unsigned  DSP_ACT_PE = IS_MVU ? (PE + MVU_ACTIVATION_FANOUT - 1)/MVU_ACTIVATION_FANOUT : ACT_PE;
 	typedef logic [PE    -1:0][SIMD-1:0][WEIGHT_WIDTH    -1:0]  mvu_w_t;
 	typedef logic [ACT_PE-1:0][SIMD-1:0][ACTIVATION_WIDTH-1:0]  mvu_a_t;
 
@@ -182,12 +184,14 @@ module mvu_vvu_axi #(
 		localparam int unsigned  EFFECTIVE_SIMD = SIMD_UNEVEN && PUMPED_COMPUTE ? SIMD+1 : SIMD;
 		localparam int unsigned  DSP_SIMD = EFFECTIVE_SIMD/(PUMPED_COMPUTE+1);
 		typedef logic [PE    -1:0][DSP_SIMD-1:0][WEIGHT_WIDTH    -1:0]  dsp_w_t;
-		typedef logic [ACT_PE-1:0][DSP_SIMD-1:0][ACTIVATION_WIDTH-1:0]  dsp_a_t;
+		typedef logic [ACT_PE    -1:0][DSP_SIMD-1:0][ACTIVATION_WIDTH-1:0]  dsp_a_soft_t;
+		typedef logic [DSP_ACT_PE-1:0][DSP_SIMD-1:0][ACTIVATION_WIDTH-1:0]  dsp_a_int8_t;
 
 		uwire  dsp_last;
 		uwire  dsp_zero;
 		uwire dsp_w_t  dsp_w;
-		uwire dsp_a_t  dsp_a;
+		uwire dsp_a_soft_t  dsp_a_soft;
+		uwire dsp_a_int8_t  dsp_a_int8;
 
 		uwire  dsp_vld;
 		uwire dsp_p_t  dsp_p;
@@ -196,7 +200,15 @@ module mvu_vvu_axi #(
 			assign	dsp_zero = idle || !s_axis_weights_tvalid || !avld;
 			assign	dsp_last = alast && !dsp_zero;
 			assign	dsp_w = mvu_w;
-			assign	dsp_a = amvau_i;
+			assign	dsp_a_soft = amvau_i;
+			if (IS_MVU) begin : genMVUActRep
+				for(genvar  pe = 0; pe < DSP_ACT_PE; pe++) begin : genPE
+					assign	dsp_a_int8[pe] = amvau_i[0];
+				end
+			end : genMVUActRep
+			else begin : genVVUActRep
+				assign	dsp_a_int8 = amvau_i;
+			end : genVVUActRep
 
 			assign	ovld = dsp_vld;
 			assign	odat = dsp_p;
@@ -234,33 +246,59 @@ module mvu_vvu_axi #(
 				else     Active <= !Active;
 			end
 
-			dsp_w_t  W = 'x;
+			localparam int unsigned  DSP_W_WIDTH = PE * DSP_SIMD * WEIGHT_WIDTH;
+			typedef logic [DSP_W_WIDTH-1:0]  dsp_w_flat_t;
+			dsp_w_flat_t  W = 'x;
 			for(genvar  pe = 0; pe < PE; pe++) begin : genPERegW
+				localparam int unsigned  W_BASE = pe * DSP_SIMD * WEIGHT_WIDTH;
 
 				uwire [2*DSP_SIMD-1:0][WEIGHT_WIDTH-1:0]  w;
 				for(genvar  i =    0; i <       SIMD; i++)  assign  w[i] = mvu_w[pe][i];
 				for(genvar  i = SIMD; i < 2*DSP_SIMD; i++)  assign  w[i] = 0;
 
 				always_ff @(posedge ap_clk2x) begin
-					if(rst)  W[pe] <= 'x;
-					else     W[pe] <= w[(Active? DSP_SIMD : 0) +: DSP_SIMD];
+					if(rst)  W[W_BASE +: DSP_SIMD*WEIGHT_WIDTH] <= 'x;
+					else     W[W_BASE +: DSP_SIMD*WEIGHT_WIDTH] <= w[(Active? DSP_SIMD : 0) +: DSP_SIMD];
 				end
 
 			end : genPERegW
 
-			dsp_a_t  A = 'x;
-			for(genvar  pe = 0; pe < ACT_PE; pe++) begin : genPERegA
+			localparam int unsigned  DSP_A_SOFT_WIDTH = ACT_PE * DSP_SIMD * ACTIVATION_WIDTH;
+			typedef logic [DSP_A_SOFT_WIDTH-1:0]  dsp_a_soft_flat_t;
+			(* max_fanout = 8 *)
+			dsp_a_soft_flat_t  ASoft = 'x;
+			for(genvar  pe = 0; pe < ACT_PE; pe++) begin : genPERegASoft
+				localparam int unsigned  A_BASE = pe * DSP_SIMD * ACTIVATION_WIDTH;
 
 				uwire [2*DSP_SIMD-1:0][ACTIVATION_WIDTH-1:0]  a;
 				for(genvar  i =    0; i <       SIMD; i++)  assign  a[i] = amvau_i[pe][i];
 				for(genvar  i = SIMD; i < 2*DSP_SIMD; i++)  assign  a[i] = 0;
 
 				always_ff @(posedge ap_clk2x) begin
-					if(rst)  A[pe] <= 'x;
-					else     A[pe] <= a[(Active? DSP_SIMD : 0) +: DSP_SIMD];
+					if(rst)  ASoft[A_BASE +: DSP_SIMD*ACTIVATION_WIDTH] <= 'x;
+					else     ASoft[A_BASE +: DSP_SIMD*ACTIVATION_WIDTH] <= a[(Active? DSP_SIMD : 0) +: DSP_SIMD];
 				end
 
-			end : genPERegA
+			end : genPERegASoft
+
+			localparam int unsigned  DSP_A_INT8_WIDTH = DSP_ACT_PE * DSP_SIMD * ACTIVATION_WIDTH;
+			typedef logic [DSP_A_INT8_WIDTH-1:0]  dsp_a_int8_flat_t;
+			(* max_fanout = 8 *)
+			dsp_a_int8_flat_t  AInt8 = 'x;
+			for(genvar  pe = 0; pe < DSP_ACT_PE; pe++) begin : genPERegAInt8
+				localparam int unsigned  A_BASE = pe * DSP_SIMD * ACTIVATION_WIDTH;
+				localparam int unsigned  SRC_PE = IS_MVU ? 0 : pe;
+
+				uwire [2*DSP_SIMD-1:0][ACTIVATION_WIDTH-1:0]  a;
+				for(genvar  i =    0; i <       SIMD; i++)  assign  a[i] = amvau_i[SRC_PE][i];
+				for(genvar  i = SIMD; i < 2*DSP_SIMD; i++)  assign  a[i] = 0;
+
+				always_ff @(posedge ap_clk2x) begin
+					if(rst)  AInt8[A_BASE +: DSP_SIMD*ACTIVATION_WIDTH] <= 'x;
+					else     AInt8[A_BASE +: DSP_SIMD*ACTIVATION_WIDTH] <= a[(Active? DSP_SIMD : 0) +: DSP_SIMD];
+				end
+
+			end : genPERegAInt8
 
 			logic  Zero = 1;
 			logic  Last = 0;
@@ -278,8 +316,9 @@ module mvu_vvu_axi #(
 
 			assign	dsp_last = Last;
 			assign	dsp_zero = Zero;
-			assign	dsp_w = W;
-			assign	dsp_a = A;
+			assign	dsp_w = dsp_w_t'(W);
+			assign	dsp_a_soft = dsp_a_soft_t'(ASoft);
+			assign	dsp_a_int8 = dsp_a_int8_t'(AInt8);
 
 			// Since no two consecutive last cycles will ever be asserted on the input,
 			// valid outputs will also always be spaced by, at least, one other cycle.
@@ -318,10 +357,11 @@ module mvu_vvu_axi #(
 				.WEIGHT_WIDTH(WEIGHT_WIDTH), .ACTIVATION_WIDTH(ACTIVATION_WIDTH), .ACCU_WIDTH(ACCU_WIDTH),
 				.SIGNED_ACTIVATIONS(SIGNED_ACTIVATIONS),
 				.SEGMENTLEN(SEGMENTLEN),
+				.MVU_ACTIVATION_FANOUT(MVU_ACTIVATION_FANOUT),
 				.FORCE_BEHAVIORAL(FORCE_BEHAVIORAL)
 			) core (
 				.clk(PUMPED_COMPUTE? ap_clk2x : ap_clk), .rst, .en('1),
-				.last(dsp_last), .zero(dsp_zero), .w(dsp_w), .a(dsp_a),
+				.last(dsp_last), .zero(dsp_zero), .w(dsp_w), .a(dsp_a_int8),
 				.vld(dsp_vld), .p(dsp_p)
 			);
 		end : genINT8
@@ -334,7 +374,7 @@ module mvu_vvu_axi #(
 				.FORCE_BEHAVIORAL(FORCE_BEHAVIORAL)
 			) core (
 				.clk(PUMPED_COMPUTE? ap_clk2x : ap_clk), .rst, .en('1),
-				.last(dsp_last), .zero(dsp_zero), .w(dsp_w), .a(dsp_a),
+				.last(dsp_last), .zero(dsp_zero), .w(dsp_w), .a(dsp_a_soft),
 				.vld(dsp_vld), .p(dsp_p)
 			);
 		end : genSoftVec
@@ -348,30 +388,71 @@ module mvu_vvu_axi #(
 
 		// This is conservative and could be divided by a guaranteed minimum output interval, e.g. MW/SIMD.
 		localparam int unsigned  MAX_IN_FLIGHT = CORE_PIPELINE_DEPTH;
-		typedef logic [PE-1:0][ACCU_WIDTH-1:0]  output_t;
+		localparam int unsigned  O_WIDTH = PE * ACCU_WIDTH;
+		localparam int unsigned  OBUF_CE_GROUP_WIDTH = 128;
+		localparam int unsigned  OBUF_CE_GROUPS = (O_WIDTH + OBUF_CE_GROUP_WIDTH - 1)/OBUF_CE_GROUP_WIDTH;
+		typedef logic [O_WIDTH-1:0]  output_t;
 
 		logic signed [$clog2(MAX_IN_FLIGHT+1):0]  OPtr = '1;	// -1 | 0, 1, ..., MAX_IN_FLIGHT
-		(* SHREG_EXTRACT = "YES" *)
+		// Wide output SRLs create high-fanout pointer-to-SRL paths and tight hold/setup
+		// constraints in large pumped MVAUs; use FFs to give routing more freedom.
+		(* SHREG_EXTRACT = "NO" *)
 		output_t  OBuf[0:MAX_IN_FLIGHT];
+		(* SHREG_EXTRACT = "NO" *)
+		output_t  ODatCapture = 'x;
+		(* EXTRACT_SHREG = "false", SHREG_EXTRACT = "NO", max_fanout = 16 *)
+		logic [OBUF_CE_GROUPS-1:0]  OVldCapture = '0;
 		logic     OVld  =  0;
 		output_t  OReg  = 'x;
 		logic     OLock =  0;	// Lock upon backpressure (second entry into queue)
+		uwire output_t  odat_flat = odat;
 
-		// Catch every output into (SRL) Output Queue
+		// Delay the queue push by one cycle and register replicated enables so the
+		// wide OBuf array does not route from one high-fanout CE net.
 		always_ff @(posedge ap_clk) begin
-			if(ovld)  OBuf <= { odat, OBuf[0:MAX_IN_FLIGHT-1] };
+			if(rst)  OVldCapture <= '0;
+			else     OVldCapture <= {OBUF_CE_GROUPS{ovld}};
+			ODatCapture <= odat_flat;
 		end
 
-		always_ff @(posedge ap_clk) begin
-			if(rst) begin
-				OPtr  <= '1;
-				OVld  <=  0;
-				OReg  <= 'x;
-				OLock <=  0;
-			end
-			else begin
-				automatic logic  push = ovld;
-				automatic logic  pop  = (m_axis_output_tready || !OVld) && !OPtr[$left(OPtr)];
+			for(genvar  g = 0; g < OBUF_CE_GROUPS; g++) begin : genOBufCEGroup
+				localparam int unsigned  G_BASE = g * OBUF_CE_GROUP_WIDTH;
+				localparam int unsigned  G_WIDTH = (G_BASE + OBUF_CE_GROUP_WIDTH <= O_WIDTH)? OBUF_CE_GROUP_WIDTH : O_WIDTH - G_BASE;
+				always_ff @(posedge ap_clk) begin
+					if(OVldCapture[g]) begin
+					OBuf[0][G_BASE +: G_WIDTH] <= ODatCapture[G_BASE +: G_WIDTH];
+					for(int  stage = 1; stage <= MAX_IN_FLIGHT; stage++) begin
+						OBuf[stage][G_BASE +: G_WIDTH] <= OBuf[stage-1][G_BASE +: G_WIDTH];
+					end
+					end
+				end
+			end : genOBufCEGroup
+
+			for(genvar  g = 0; g < OBUF_CE_GROUPS; g++) begin : genORegMuxGroup
+				localparam int unsigned  G_BASE = g * OBUF_CE_GROUP_WIDTH;
+				localparam int unsigned  G_WIDTH = (G_BASE + OBUF_CE_GROUP_WIDTH <= O_WIDTH)? OBUF_CE_GROUP_WIDTH : O_WIDTH - G_BASE;
+				(* max_fanout = 16 *)
+				wire signed [$clog2(MAX_IN_FLIGHT+1):0]  OPtrGroup = OPtr;
+
+				always_ff @(posedge ap_clk) begin
+					if(rst) begin
+						OReg[G_BASE +: G_WIDTH] <= 'x;
+					end
+					else if(m_axis_output_tready || !OVld) begin
+						OReg[G_BASE +: G_WIDTH] <= OBuf[OPtrGroup[$left(OPtrGroup)-1:0]][G_BASE +: G_WIDTH];
+					end
+				end
+			end : genORegMuxGroup
+
+			always_ff @(posedge ap_clk) begin
+				if(rst) begin
+					OPtr  <= '1;
+					OVld  <=  0;
+					OLock <=  0;
+				end
+				else begin
+					automatic logic  push = OVldCapture[0];
+					automatic logic  pop  = (m_axis_output_tready || !OVld) && !OPtr[$left(OPtr)];
 				assert(pop || !push || (OPtr < $signed(MAX_IN_FLIGHT))) else begin
 					$error("%m: Overflowing output queue.");
 				end
@@ -380,18 +461,17 @@ module mvu_vvu_axi #(
 				if(OPtr[$left(OPtr)])                   OLock <= 0;
 				else if(OVld && !m_axis_output_tready)  OLock <= 1;
 
-				if(m_axis_output_tready || !OVld) begin
-					OVld <= !OPtr[$left(OPtr)];
-					OReg <= OBuf[OPtr[$left(OPtr)-1:0]];
+					if(m_axis_output_tready || !OVld) begin
+						OVld <= !OPtr[$left(OPtr)];
+					end
 				end
 			end
-		end
 		assign	idle = OLock;
 
 		assign	m_axis_output_tvalid = OVld;
 		// Why would we need a sign extension here potentially creating a higher signal load into the next FIFO?
 		// These extra bits should never be used. Why not 'x them out?
-		assign	m_axis_output_tdata = { {(OUTPUT_STREAM_WIDTH_BA-OUTPUT_STREAM_WIDTH){OReg[PE-1][ACCU_WIDTH-1]}}, OReg };
+		assign	m_axis_output_tdata = { {(OUTPUT_STREAM_WIDTH_BA-OUTPUT_STREAM_WIDTH){OReg[O_WIDTH-1]}}, OReg };
 
 	end : blkOutput
 

@@ -43,6 +43,10 @@ class FoldQuantWeights(Transformation):
     of the weight tensor.
     """
 
+    def __init__(self, infer_shapes=True):
+        super().__init__()
+        self._infer_shapes = infer_shapes
+
     def apply(self, model):
         graph = model.graph
         node_ind = 0
@@ -263,6 +267,7 @@ class FoldQuantWeights(Transformation):
                     graph_modified = True
                     # Note: Running shape inference is necessary as shape
                     # annotations have been deleted above
-                    model = model.transform(InferShapes())
+                    if self._infer_shapes:
+                        model = model.transform(InferShapes())
                     return (model, graph_modified)
         return (model, graph_modified)

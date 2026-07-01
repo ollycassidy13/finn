@@ -41,9 +41,11 @@ module mvu_vvu_8sx9_dsp58 #(
 
     bit SIGNED_ACTIVATIONS = 0,
     int unsigned SEGMENTLEN = 0, // Default to 0 (which implies a single segment)
+	int unsigned MVU_ACTIVATION_FANOUT = 8,
 	bit FORCE_BEHAVIORAL = 0,
 
-	localparam int unsigned ACTIVATION_ELEMENTS = (IS_MVU ? 1 : PE) * SIMD,
+	localparam int unsigned PE_ACTIVATION = IS_MVU ? (PE + MVU_ACTIVATION_FANOUT - 1)/MVU_ACTIVATION_FANOUT : PE,
+	localparam int unsigned ACTIVATION_ELEMENTS = PE_ACTIVATION * SIMD,
 	localparam int unsigned WEIGHT_ELEMENTS = PE*SIMD
   )  (
     // Global Control
@@ -90,7 +92,6 @@ module mvu_vvu_8sx9_dsp58 #(
 //-------------------- Declare global signals --------------------\\
 	localparam int unsigned CHAINLEN = (SIMD+2)/3;
 	localparam int unsigned SEGLEN = SEGMENTLEN == 0 ? CHAINLEN : SEGMENTLEN; // Additional constant to default a SEGMENTLEN of '0' to the DSP-chain length
-	localparam int unsigned PE_ACTIVATION = IS_MVU ? 1 : PE;
 	uwire [26:0] a_in_i [PE_ACTIVATION * CHAINLEN];
 	uwire [23:0] b_in_i [PE][CHAINLEN];
 	uwire [PE-1:0][CHAINLEN-1:0][57:0] pcout; // Array with packed dimension > 256 (with a loop-carried dependency) cannot be handled out-of-the-box with PyVerilator
@@ -129,9 +130,10 @@ module mvu_vvu_8sx9_dsp58 #(
 			localparam int TOTAL_PREGS = i/SEGLEN;
 			localparam int EXTERNAL_PREGS = TOTAL_PREGS>1 ? TOTAL_PREGS-1 : 0;
 			localparam int LANES_OCCUPIED = i == CHAINLEN-1 ? SIMD - 3*i : 3;
+			localparam int ACT_BASE = SIMD*k;
 
 			if (EXTERNAL_PREGS > 0) begin : genExternalPregAct
-				(* EXTRACT_SHREG = "true" *)
+				(* EXTRACT_SHREG = "false", SHREG_EXTRACT = "NO", max_fanout = 8 *)
 				logic [0:EXTERNAL_PREGS-1][LANES_OCCUPIED-1:0][ACTIVATION_WIDTH-1:0] A = '{ default : 'x };
 				always_ff @(posedge clk) begin
 					if(en) begin
@@ -139,7 +141,7 @@ module mvu_vvu_8sx9_dsp58 #(
 // synthesis translate_off
 							zero ? '1 :
 // synthesis translate_on
-							a[SIMD*k + 3*i +: LANES_OCCUPIED];
+							a[ACT_BASE + 3*i +: LANES_OCCUPIED];
 						if (EXTERNAL_PREGS > 1)   A[0:EXTERNAL_PREGS-2] <= A[1:EXTERNAL_PREGS-1];
 					end
 				end
@@ -157,8 +159,8 @@ module mvu_vvu_8sx9_dsp58 #(
 // synthesis translate_off
 						zero ? '1 :
 // synthesis translate_on
-						SIGNED_ACTIVATIONS ? PAD_BITS_ACT == 0 ? a[SIMD*k+3*i+j] : { {PAD_BITS_ACT{a[SIMD*k+3*i+j][ACTIVATION_WIDTH-1]}}, a[SIMD*k+3*i+j] }
-													: PAD_BITS_ACT == 0 ? a[SIMD*k+3*i+j] : { {PAD_BITS_ACT{1'b0}}, a[SIMD*k+3*i+j] } ;
+						SIGNED_ACTIVATIONS ? PAD_BITS_ACT == 0 ? a[ACT_BASE+3*i+j] : { {PAD_BITS_ACT{a[ACT_BASE+3*i+j][ACTIVATION_WIDTH-1]}}, a[ACT_BASE+3*i+j] }
+													: PAD_BITS_ACT == 0 ? a[ACT_BASE+3*i+j] : { {PAD_BITS_ACT{1'b0}}, a[ACT_BASE+3*i+j] } ;
 				end : genAin
 				for (genvar j=LANES_OCCUPIED; j<3; j++) begin : genAinZero
 					assign a_in_i[CHAINLEN*k+i][9*j +: 9] = 9'b0;
@@ -177,7 +179,7 @@ module mvu_vvu_8sx9_dsp58 #(
 			localparam int LANES_OCCUPIED = j == CHAINLEN-1 ? SIMD - 3*j : 3;
 
 			if (EXTERNAL_PREGS > 0) begin : genExternalPregWeight
-				(* EXTRACT_SHREG = "true" *)
+				(* EXTRACT_SHREG = "false", SHREG_EXTRACT = "NO" *)
 				logic [0:PE-1][0:EXTERNAL_PREGS-1][LANES_OCCUPIED-1:0][WEIGHT_WIDTH-1:0] B = '{ default : 'x };
 				always_ff @(posedge clk) begin
 					if(en) begin
@@ -220,6 +222,7 @@ module mvu_vvu_8sx9_dsp58 #(
 			localparam bit PREG = (j+1)%SEGLEN==0 || j == CHAINLEN-1;
 			localparam bit FIRST = j == 0;
 			localparam bit LAST = j == CHAINLEN-1;
+			localparam int ACT_PE_INDEX = IS_MVU ? i/MVU_ACTIVATION_FANOUT : i;
 			uwire [57:0] pp;
 
 			if (LAST) begin : genPOUT
@@ -235,7 +238,7 @@ module mvu_vvu_8sx9_dsp58 #(
 				always_ff @(posedge clk) begin
 					if (rst)	Areg <= '{ default : 0};
 					else if (en) begin
-						Areg[0] <= { 7'bx, a_in_i[(IS_MVU ? 0 : CHAINLEN*i) + j] };
+						Areg[0] <= { 7'bx, a_in_i[CHAINLEN*ACT_PE_INDEX + j] };
 						if (INTERNAL_PREGS == 2) Areg[1] <= Areg[0];
 					end
 				end
@@ -410,7 +413,7 @@ module mvu_vvu_8sx9_dsp58 #(
 							7'b000_0000
 					}), // 9-bit input: Operation mode
 					// Data inputs: Data Ports
-					.A({ 7'bx, a_in_i[(IS_MVU ? 0 : CHAINLEN*i) + j] }),            // 34-bit input: A data
+					.A({ 7'bx, a_in_i[CHAINLEN*ACT_PE_INDEX + j] }),            // 34-bit input: A data
 					.B(b_in_i[i][j]),                   // 24-bit input: B data
 					.C('x),                             // 58-bit input: C data
 					.CARRYIN('0),                       // 1-bit input: Carry-in

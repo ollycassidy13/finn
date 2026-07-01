@@ -39,6 +39,16 @@ from qonnx.util.basic import get_by_name
 from finn.util.basic import getHWCustomOp
 
 
+def _get_transpose_perm(model, node):
+    perm_attr = get_by_name(node.attribute, "perm")
+    if perm_attr is not None:
+        return list(perm_attr.ints)
+    input_shape = model.get_tensor_shape(node.input[0])
+    if input_shape is None:
+        return None
+    return list(reversed(range(len(input_shape))))
+
+
 class AbsorbSignBiasIntoMultiThreshold(Transformation):
     """Absorb scalar bias originating from signed int export back into
     MultiThreshold and re-evaluate the output datatype."""
@@ -72,24 +82,27 @@ class AbsorbSignBiasIntoMultiThreshold(Transformation):
                     if not is_scalar:
                         continue
                     bias = A.flatten()[0]
-                    # set MultiThreshold bias property
                     mt_inst = getHWCustomOp(mt_node, model)
                     bias += mt_inst.get_nodeattr("out_bias")
-                    mt_inst.set_nodeattr("out_bias", bias)
-                    graph_modified = True
                     # compute new DataType for MultiThreshold output
                     steps = T.shape[-1]
                     new_min = bias
                     new_max = steps + bias
-                    odt = DataType.get_smallest_possible(steps).name.replace("UINT", "INT")
-                    odt = DataType[odt]
-                    assert odt.allowed(new_max) and odt.allowed(
-                        new_min
-                    ), """Could
-                    not compute new MultiThreshold DataType (min = %d max = %d)""" % (
-                        new_min,
-                        new_max,
-                    )
+                    if int(new_min) != new_min or int(new_max) != new_max:
+                        continue
+                    for cand in DataType.get_accumulator_dt_cands():
+                        odt = DataType[cand]
+                        if odt.allowed(new_min) and odt.allowed(new_max):
+                            break
+                    else:
+                        raise AssertionError(
+                            """Could
+                    not compute new MultiThreshold DataType (min = %d max = %d)"""
+                            % (new_min, new_max)
+                        )
+                    # set MultiThreshold bias property
+                    mt_inst.set_nodeattr("out_bias", bias)
+                    graph_modified = True
                     mt_inst.set_nodeattr("out_dtype", odt.name)
                     # remove Add node, rewire MultiThreshold
                     graph.node.remove(add_node)
@@ -204,7 +217,8 @@ class AbsorbMulIntoMultiThreshold(Transformation):
             if n.op_type == "Mul" and not model.is_fork_node(n) and not model.is_join_node(n):
                 mul_weight_name = n.input[1]
                 A = model.get_initializer(mul_weight_name)
-                assert A is not None, "Initializer for mul weights is not set."
+                if A is None:
+                    continue
                 is_signed = (A < 0).any()
                 is_scalar = A.ndim == 0 or all(x == 1 for x in A.shape)
                 actual_ndims = len(tuple(filter(lambda x: x > 1, A.shape)))
@@ -259,7 +273,8 @@ class FactorOutMulSignMagnitude(Transformation):
             if n.op_type == "Mul" and not model.is_join_node(n):
                 mul_weight_name = n.input[1]
                 A = model.get_initializer(mul_weight_name)
-                assert A is not None, "Initializer for mul weights is not set."
+                if A is None:
+                    continue
                 is_scalar = np.prod(A.shape) == 1
                 actual_ndims = len(tuple(filter(lambda x: x > 1, A.shape)))
                 is_1d = actual_ndims == 1
@@ -384,7 +399,9 @@ class AbsorbTransposeIntoMultiThreshold(Transformation):
         for n in nodes:
             node_ind += 1
             if n.op_type == "Transpose" and not model.is_fork_node(n):
-                perms = list(get_by_name(n.attribute, "perm").ints)
+                perms = _get_transpose_perm(model, n)
+                if perms is None:
+                    continue
                 if perms == [0, 3, 1, 2]:
                     mt_cand = model.find_consumer(n.output[0])
                     if (
@@ -447,10 +464,12 @@ class AbsorbTransposeIntoFlatten(Transformation):
                 if (
                     prod is not None
                     and prod.op_type == "Transpose"
+                ):
                     # we ensure that the first dimension is not changed from the
                     # transpose operation
-                    and get_by_name(prod.attribute, "perm").ints[0] == 0
-                ):
+                    perms = _get_transpose_perm(model, prod)
+                    if perms is None or perms[0] != 0:
+                        continue
                     data_layout = model.get_tensor_layout(prod.input[0])
                     # check for the data layout to interpret input shape correctly
                     if data_layout is None:
@@ -552,15 +571,17 @@ class AbsorbConsecutiveTransposes(Transformation):
         for node in graph.node:
             if node.op_type == "Transpose":
                 next_nodes = model.find_consumers(node.output[0])
-                perms1 = list(get_by_name(node.attribute, "perm").ints)
+                perms1 = _get_transpose_perm(model, node)
+                if perms1 is None:
+                    continue
                 if len(next_nodes) == 0:
                     continue
                 # check if all nodes after fork are opposite transposes
                 all_opposite_transposes = True
                 for next_node in next_nodes:
                     if next_node is not None and next_node.op_type == "Transpose":
-                        perms2 = list(get_by_name(next_node.attribute, "perm").ints)
-                        if not self.are_opposite_permutations(perms1, perms2):
+                        perms2 = _get_transpose_perm(model, next_node)
+                        if perms2 is None or not self.are_opposite_permutations(perms1, perms2):
                             all_opposite_transposes = False
                             break
                     else:
@@ -601,7 +622,9 @@ class AbsorbTransposeIntoResize(Transformation):
         for node in graph.node:
             node_ind += 1
             if node.op_type == "Transpose" and not model.is_fork_node(node):
-                perms = list(get_by_name(node.attribute, "perm").ints)
+                perms = _get_transpose_perm(model, node)
+                if perms is None:
+                    continue
                 if perms == [0, 3, 1, 2]:
                     mt_cand = model.find_consumer(node.output[0])
                     if mt_cand is not None and mt_cand.op_type == "Resize":

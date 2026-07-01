@@ -7,7 +7,7 @@
  * @author	Thomas B. Preußer <thomas.preusser@amd.com>
  ***************************************************************************/
 
-module queue #(
+module layernorm_queue #(
 	int unsigned  DATA_WIDTH,
 	int unsigned  ELASTICITY
 )(
@@ -31,9 +31,20 @@ module queue #(
 		end
 	end
 
-	logic signed [$clog2(ELASTICITY):0]  Ptr = '1;	// -1, 0, 1, ..., ELASTICITY-1
+	localparam int unsigned  PTR_WIDTH = $clog2(ELASTICITY);
+	localparam int unsigned  COUNT_WIDTH = $clog2(ELASTICITY+1);
+	typedef logic [PTR_WIDTH-1:0]  ptr_t;
+	typedef logic [COUNT_WIDTH-1:0]  count_t;
+
+	function automatic ptr_t inc_ptr(input ptr_t ptr);
+		return  (ptr == ptr_t'(ELASTICITY-1))? '0 : ptr + ptr_t'(1);
+	endfunction : inc_ptr
+
+	count_t  Cnt = '0;
+	ptr_t  WrPtr = '0;
+	ptr_t  RdPtr = '0;
 	logic  Rdy = 1;
-	dat_t  A[ELASTICITY];
+	(* ram_style = "block" *) dat_t  A[ELASTICITY];
 	assign	irdy = Rdy;
 
 	logic  Vld = 0;
@@ -43,36 +54,38 @@ module queue #(
 
 	uwire  bload = !Vld || ordy;
 	uwire  push = Rdy && ivld;
-	uwire  pop = !Ptr[$left(Ptr)] && bload;
+	uwire  pop = (Cnt != 0) && bload;
+	uwire count_t  CntN = Cnt + count_t'(push) - count_t'(pop);
 
 	always_ff @(posedge clk) begin
-		if(push)  A <= { idat, A[0:ELASTICITY-2] };
+		if(push)  A[WrPtr] <= idat;
 	end
 
 	always_ff @(posedge clk) begin
 		if(rst) begin
-			Ptr <= '1;
+			Cnt <= '0;
+			WrPtr <= '0;
+			RdPtr <= '0;
 			Rdy <= 1;
 			Vld <= 0;
 			B <= 'x;
 		end
 		else begin
 			// Make sure Rdy encodes what it's supposed to: space available in queue
-			assert(Rdy == (Ptr < signed'(ELASTICITY-1))) else begin
+			assert(Rdy == (Cnt < ELASTICITY)) else begin
 				$error("%m: Broken Rdy computation.");
 				$stop;
 			end
 
-			Ptr <= Ptr + ((push == pop)? 0 : push? 1 : -1);
-			//  pop ==  push: no change
-			//  pop && !push: new space
-			// !pop &&  push: remaining space if not yet Ptr == ELASTICITY-2
-			Rdy <= (pop == push)? Rdy : pop? 1 : Ptr[$left(Ptr)] || (((ELASTICITY-2) & ~Ptr[$left(Ptr)-1:0]) != 0);
+			Cnt <= CntN;
+			if(push)  WrPtr <= inc_ptr(WrPtr);
+			if(pop)   RdPtr <= inc_ptr(RdPtr);
+			Rdy <= CntN < ELASTICITY;
 			if(bload) begin
-				Vld <= !Ptr[$left(Ptr)];
-				B <= A[Ptr[$left(Ptr)-1:0]];
+				Vld <= Cnt != 0;
+				B <= A[RdPtr];
 			end
 		end
 	end
 
-endmodule : queue
+endmodule : layernorm_queue

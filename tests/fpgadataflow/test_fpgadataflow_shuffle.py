@@ -15,6 +15,7 @@ import os
 import tempfile
 import torch
 import torch.onnx
+from pathlib import Path
 from brevitas.export import export_qonnx
 from onnx import TensorProto, helper
 from qonnx.core.datatype import DataType
@@ -660,3 +661,43 @@ def test_inner_shuffle_rtl_wrapper_axis_widths_are_byte_padded(tmp_path):
     assert "assign out0_V_TDATA[20-1:0] = out0_core_TDATA" in wrapper_text
     assert ".idat(in0_core_TDATA)" in wrapper_text
     assert ".odat(out0_core_TDATA)" in wrapper_text
+
+
+@pytest.mark.fpgadataflow
+def test_outer_shuffle_hls_uram_codegen(tmp_path):
+    node = helper.make_node(
+        "OuterShuffle_hls",
+        ["inp"],
+        ["outp"],
+        domain="finn.custom_op.fpgadataflow.hls",
+        backend="fpgadataflow",
+        name="OuterShuffle_hls_0",
+        data_type="INT8",
+        in_shape=[1, 128, 12, 32],
+        transpose_in_shape=[1, 128, 12, 32],
+        out_shape=[1, 12, 128, 32],
+        transpose_out_shape=[1, 12, 128, 32],
+        loop_coeffs=[49152, 32, 384, 1],
+        perm=[0, 2, 1, 3],
+        SIMD=1,
+        ram_style="ultra",
+    )
+    inp = helper.make_tensor_value_info("inp", TensorProto.FLOAT, [1, 128, 12, 32])
+    outp = helper.make_tensor_value_info("outp", TensorProto.FLOAT, [1, 12, 128, 32])
+    graph = helper.make_graph([node], "outer-shuffle-uram", [inp], [outp])
+    model = ModelWrapper(qonnx_make_model(graph, producer_name="outer-shuffle-uram"))
+    model.set_tensor_datatype("inp", DataType["INT8"])
+    model.set_tensor_datatype("outp", DataType["INT8"])
+
+    node_inst = getCustomOp(model.graph.node[0])
+    node_inst.set_nodeattr("code_gen_dir_ipgen", str(tmp_path))
+    node_inst.code_generation_ipgen(model, test_fpga_part, test_synth_clk_period_ns)
+
+    top_cpp = (tmp_path / "top_OuterShuffle_hls_0.cpp").read_text()
+    hls_tcl = (tmp_path / "hls_syn_OuterShuffle_hls_0.tcl").read_text()
+    uram_header = (Path(os.environ["FINN_ROOT"]) / "custom_hls/input_gen_uram.hpp").read_text()
+
+    assert '#include "input_gen_uram.hpp"' in top_cpp
+    assert "input_gen_uram<-1,49152,1,49152,12,32,128,384,32,1>" in top_cpp
+    assert "-I$config_customhlsdir" in hls_tcl
+    assert "#pragma HLS BIND_STORAGE variable=buf type=RAM_S2P impl=URAM" in uram_header

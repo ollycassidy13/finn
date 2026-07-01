@@ -354,11 +354,19 @@ module thresholding #(
 	//	- Typically mapped to an SRL shift register
 	if(1) begin : blkStreamOutput
 		localparam int unsigned  A_DEPTH = MAX_PENDING - 1;
-		logic        [PE-1 : 0][M-1 : 0]  ADat[A_DEPTH];
+		localparam int unsigned  A_WIDTH = PE * M;
+		typedef logic [A_WIDTH-1:0]  adat_t;
+
+		adat_t  ADat[A_DEPTH];
 		logic signed [$clog2(A_DEPTH):0]  APtr = '1;	// -1, 0, 1, ..., A_DEPTH-1
 		uwire  avld = !APtr[$left(APtr)];
 
-		logic [PE-1:0][M-1:0]  BDat = 'x;
+		adat_t  ADatIn;
+		for(genvar  pe = 0; pe < PE; pe++) begin : genADatIn
+			assign	ADatIn[pe*M +: M] = pipe[pe][M].ptr[M-1:0];
+		end
+
+		adat_t  BDat = 'x;
 		logic  BVld =  0;
 
 		uwire  aload = pipe[0][M].op ==? TH;
@@ -369,7 +377,7 @@ module thresholding #(
 				assert(APtr < $signed(A_DEPTH-1)) else begin
 					$error("Overrun after failing stream guard.");
 				end
-				foreach(pipe[pe])  ADat[0][pe] <= pipe[pe][M].ptr;
+				ADat[0] <= ADatIn;
 				for(int unsigned  i = 1; i < A_DEPTH; i++)  ADat[i] <= ADat[i-1];
 			end
 		end
@@ -390,7 +398,8 @@ module thresholding #(
 
 		assign	ovld = BVld;
 		for(genvar  pe = 0; pe < PE; pe++) begin
-			assign	odat[pe] = BDat[pe] + BIAS;
+			uwire [M-1:0]  bdat = BDat[pe*M +: M];
+			assign	odat[pe] = bdat + BIAS;
 		end
 	end : blkStreamOutput
 

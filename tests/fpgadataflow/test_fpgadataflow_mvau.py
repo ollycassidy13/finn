@@ -28,6 +28,8 @@
 
 import pytest
 
+from pathlib import Path
+
 import numpy as np
 import os
 import qonnx.custom_op.general.xnorpopcount as xp
@@ -187,6 +189,261 @@ def prepare_inputs(input_tensor, idt, wdt, inp_name="inp"):
         return {inp_name: (input_tensor + 1) / 2}
     else:
         return {inp_name: input_tensor}
+
+
+@pytest.mark.fpgadataflow
+def test_mvau_rtl_dsp_segment_len_env_cap(monkeypatch):
+    part = "xcvc1902-vsva2197-2MP-e-S"
+    mw = 64
+    mh = 136
+    pe = 136
+    simd = 64
+
+    ifm = helper.make_tensor_value_info("ifm", TensorProto.FLOAT, [1, mw])
+    ofm = helper.make_tensor_value_info("ofm", TensorProto.FLOAT, [1, mh])
+    W = gen_finn_dt_tensor(DataType["INT8"], (mw, mh))
+    model = make_single_matmul_modelwrapper(ifm, ofm, DataType["UINT8"], DataType["INT8"], W)
+    model = model.transform(to_hw.InferQuantizedMatrixVectorActivation())
+    model = model.transform(GiveUniqueNodeNames())
+    model = model.transform(SpecializeLayers(part))
+    model = model.transform(GiveUniqueNodeNames())
+    model = model.transform(
+        ApplyConfig(
+            {
+                "Defaults": {},
+                "MVAU_rtl_0": {
+                    "PE": pe,
+                    "SIMD": simd,
+                    "resType": "dsp",
+                    "pumpedCompute": 1,
+                },
+            }
+        )
+    )
+
+    inst = getHWCustomOp(model.graph.node[0])
+    assert inst._resolve_segment_len(4.0) == 3
+    monkeypatch.setenv("FINN_MVAU_SEGMENTLEN_MAX", "2")
+    assert inst._resolve_segment_len(4.0) == 2
+    monkeypatch.setenv("FINN_MVAU_SEGMENTLEN_MAX", "99")
+    assert inst._resolve_segment_len(4.0) == 3
+    monkeypatch.setenv("FINN_MVAU_SEGMENTLEN_MAX", "0")
+    with pytest.raises(ValueError, match="positive integer"):
+        inst._resolve_segment_len(4.0)
+
+
+@pytest.mark.fpgadataflow
+def test_fetch_weights_th1_parallel_mvau_uses_direct_stream_width(tmp_path):
+    """TH=1 external-memory MVAUs should avoid the full local weight buffer."""
+
+    part = "xcvc1902-vsva2197-2MP-e-S"
+    mw = 64
+    mh = 64
+    pe = 4
+    simd = 4
+
+    ifm = helper.make_tensor_value_info("ifm", TensorProto.FLOAT, [1, mw])
+    ofm = helper.make_tensor_value_info("ofm", TensorProto.FLOAT, [1, mh])
+    W = gen_finn_dt_tensor(DataType["INT8"], (mw, mh))
+    model = make_single_matmul_modelwrapper(ifm, ofm, DataType["UINT8"], DataType["INT8"], W)
+
+    model = model.transform(to_hw.InferQuantizedMatrixVectorActivation())
+    model = model.transform(GiveUniqueNodeNames())
+    model = model.transform(SpecializeLayers(part))
+    model = model.transform(GiveUniqueNodeNames())
+    model = model.transform(
+        ApplyConfig(
+            {
+                "Defaults": {},
+                "MVAU_rtl_0": {
+                    "PE": pe,
+                    "SIMD": simd,
+                    "TH": 1,
+                    "resType": "dsp",
+                    "mem_mode": "external_mem",
+                },
+            }
+        )
+    )
+    model = model.transform(MinimizeWeightBitWidth())
+    model = model.transform(MinimizeAccumulatorWidth())
+    model = model.transform(InferDataTypes())
+
+    node = model.graph.node[0]
+    node_inst = getHWCustomOp(node)
+    node_inst.set_nodeattr("code_gen_dir_ipgen", str(tmp_path))
+    node_inst.generate_hdl_fetch_weights()
+
+    wrapper = (tmp_path / f"{node.name}_fetch_weights_wrapper.v").read_text()
+    assert f"parameter   IWSIMD = {pe * simd}," in wrapper
+    assert f"parameter   WSIMD = {pe * simd}," in wrapper
+
+
+@pytest.mark.fpgadataflow
+def test_dynamic_load_packs_simd_lanes_per_pe_ram():
+    repo_root = Path(__file__).resolve().parents[2]
+    dynload = (repo_root / "finn-rtllib/dynload/hdl/dynamic_load.sv").read_text()
+    wrapper = (
+        repo_root / "finn-rtllib/dynload/hdl/dynamic_load_wrapper_template.v"
+    ).read_text()
+    hwcustomop = (repo_root / "src/finn/custom_op/fpgadataflow/hwcustomop.py").read_text()
+
+    assert "localparam int unsigned RAM_DATA_BITS = SIMD * RAM_BITS" in dynload
+    assert "logic [1:0][PE-1:0][RAM_DATA_BITS-1:0] a_data_in" in dynload
+    assert "logic [1:0][PE-1:0][SIMD-1:0][WEIGHT_WIDTH-1:0] odat_ram" in dynload
+    assert "for(genvar k = 0; k < SIMD; k++) begin" in dynload
+    assert ".DATA_BITS(RAM_DATA_BITS)" in dynload
+    assert ".a_we(a_we[i][j])" in dynload
+    assert "RAM_STYLE = $RAM_STYLE$" in wrapper
+    assert ".RAM_STYLE(RAM_STYLE)" in wrapper
+    assert '"$RAM_STYLE$": [ram_style]' in hwcustomop
+
+
+@pytest.mark.fpgadataflow
+def test_fetch_weights_overwide_dwc_uses_rtllib_adapter(tmp_path):
+    """Over-512-byte fetch-weight streams must not instantiate Vivado DWC IP."""
+
+    part = "xcvc1902-vsva2197-2MP-e-S"
+    mw = 144
+    mh = 64
+    pe = 64
+    simd = 12
+
+    ifm = helper.make_tensor_value_info("ifm", TensorProto.FLOAT, [1, mw])
+    ofm = helper.make_tensor_value_info("ofm", TensorProto.FLOAT, [1, mh])
+    W = gen_finn_dt_tensor(DataType["INT6"], (mw, mh))
+    model = make_single_matmul_modelwrapper(ifm, ofm, DataType["UINT8"], DataType["INT6"], W)
+
+    model = model.transform(to_hw.InferQuantizedMatrixVectorActivation())
+    model = model.transform(GiveUniqueNodeNames())
+    model = model.transform(SpecializeLayers(part))
+    model = model.transform(GiveUniqueNodeNames())
+    model = model.transform(
+        ApplyConfig(
+            {
+                "Defaults": {},
+                "MVAU_rtl_0": {
+                    "PE": pe,
+                    "SIMD": simd,
+                    "TH": 1,
+                    "resType": "dsp",
+                    "mem_mode": "external_mem",
+                },
+            }
+        )
+    )
+
+    node = model.graph.node[0]
+    node_inst = getHWCustomOp(node)
+    node_inst.set_nodeattr("code_gen_dir_ipgen", str(tmp_path))
+    node_inst.set_nodeattr("gen_top_module", node.name)
+    (tmp_path / f"{node.name}_wrapper.v").write_text("")
+    node_inst.generate_hdl_fetch_weights()
+
+    wrapper = (tmp_path / f"{node.name}_fetch_weights_wrapper.v").read_text()
+    assert "axis_dwc #(" in wrapper
+    assert ".S_DATA_BITS(DATA_BITS)" in wrapper
+    assert ".M_DATA_BITS(DS_BITS_BA)" in wrapper
+    assert "$DWC_" not in wrapper
+
+    ipi_cmd = "\n".join(node_inst.code_generation_ipi())
+    assert "axis_dwidth_converter" not in ipi_cmd
+    assert "axis_dwc.sv" in ipi_cmd
+    assert "axis_fifo_adapter.sv" in ipi_cmd
+
+
+@pytest.mark.fpgadataflow
+def test_mvau_hls_external_mem_global_includes_accepts_mode(tmp_path):
+    """HLS MVAU codegen must accept the external_mem mode used by MLO builds."""
+
+    part = "xcvc1902-vsva2197-2MP-e-S"
+    mw = 64
+    mh = 64
+    pe = 4
+    simd = 4
+
+    ifm = helper.make_tensor_value_info("ifm", TensorProto.FLOAT, [1, mw])
+    ofm = helper.make_tensor_value_info("ofm", TensorProto.FLOAT, [1, mh])
+    W = gen_finn_dt_tensor(DataType["INT8"], (mw, mh))
+    model = make_single_matmul_modelwrapper(ifm, ofm, DataType["UINT8"], DataType["INT8"], W)
+
+    model = model.transform(to_hw.InferQuantizedMatrixVectorActivation())
+    model = model.transform(GiveUniqueNodeNames())
+    inst = getHWCustomOp(model.graph.node[0])
+    inst.set_nodeattr("preferred_impl_style", "hls")
+    model = model.transform(SpecializeLayers(part))
+    model = model.transform(GiveUniqueNodeNames())
+    model = model.transform(
+        ApplyConfig(
+            {
+                "Defaults": {},
+                "MVAU_hls_0": {
+                    "PE": pe,
+                    "SIMD": simd,
+                    "resType": "lut",
+                    "mem_mode": "external_mem",
+                },
+            }
+        )
+    )
+
+    node_inst = getHWCustomOp(model.graph.node[0])
+    node_inst.set_nodeattr("code_gen_dir_ipgen", str(tmp_path))
+    node_inst.code_generation_ipgen(model, part, 5.0)
+
+    assert (tmp_path / "top_MVAU_hls_0.cpp").is_file()
+    assert (tmp_path / "MVAU_hls_0_fetch_weights_wrapper.v").is_file()
+
+
+@pytest.mark.fpgadataflow
+def test_mvau_rtl_internal_decoupled_ties_unused_selector(tmp_path):
+    part = "xcvc1902-vsva2197-2MP-e-S"
+    mw = 16
+    mh = 16
+    pe = 2
+    simd = 2
+    W = gen_finn_dt_tensor(DataType["INT4"], (mw, mh))
+
+    model = make_single_fclayer_modelwrapper(
+        W,
+        pe,
+        simd,
+        DataType["INT4"],
+        DataType["INT4"],
+        DataType["INT32"],
+    )
+    model = model.transform(GiveUniqueNodeNames())
+    model = model.transform(SpecializeLayers(part))
+    model = model.transform(
+        ApplyConfig(
+            {
+                "Defaults": {},
+                "MVAU_rtl_0": {
+                    "PE": pe,
+                    "SIMD": simd,
+                    "mem_mode": "internal_decoupled",
+                },
+            }
+        )
+    )
+
+    node = model.graph.node[0]
+    node.name = "MVAU_rtl_0"
+    node_inst = getHWCustomOp(node)
+    node_inst.set_nodeattr("PE", pe)
+    node_inst.set_nodeattr("SIMD", simd)
+    node_inst.set_nodeattr("mem_mode", "internal_decoupled")
+    node_inst.set_nodeattr("code_gen_dir_ipgen", str(tmp_path))
+    node_inst.set_nodeattr("gen_top_module", node.name)
+    (tmp_path / f"{node.name}_wrapper.v").write_text("")
+    (tmp_path / f"{node.name}_memstream_wrapper.v").write_text("")
+
+    ipi_cmd = "\n".join(node_inst.code_generation_ipi())
+
+    assert "xlconstant:1.1" in ipi_cmd
+    assert "MVAU_rtl_0_wstrm_selector_zero" in ipi_cmd
+    assert "s_axis_0_tvalid" in ipi_cmd
+    assert "s_axis_0_tdata" in ipi_cmd
 
 
 # activation: None or DataType

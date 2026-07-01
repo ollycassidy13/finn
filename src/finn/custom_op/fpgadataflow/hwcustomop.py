@@ -387,6 +387,7 @@ class HWCustomOp(CustomOp):
             # upper bound on how many layers can be supported, set to 64 for now
             n_max_layers = 64
             code_gen_dir = self.get_nodeattr("code_gen_dir_ipgen")
+            ram_style = '"{}"'.format(self.get_nodeattr("ram_style"))
 
             # Compute IWSIMD and WSIMD for the fetch_weights wrapper
             if self.onnx_node.op_type in ops:
@@ -394,11 +395,27 @@ class HWCustomOp(CustomOp):
                     iwsimd = (pe * simd) // theight
                     wsimd = (pe * simd) // theight
                 else:
-                    iwsimd = simd
-                    wsimd = (pe * simd) // theight
+                    iwsimd = pe * simd
+                    wsimd = pe * simd
             else:
-                iwsimd = simd
-                wsimd = (pe * simd) // theight
+                iwsimd = pe * simd
+                wsimd = pe * simd
+            ds_bits_ba = ((iwsimd * wdt.bitwidth() + 7) // 8) * 8
+            if ds_bits_ba // 8 > 512:
+                dwc_inst = """axis_dwc #(
+    .S_DATA_BITS(DATA_BITS),
+    .M_DATA_BITS(DS_BITS_BA)
+) inst_dwc (
+    .aclk(ap_clk), .aresetn(ap_rst_n),
+    .s_axis_tvalid(axis_dma_tvalid), .s_axis_tready(axis_dma_tready), .s_axis_tdata(axis_dma_tdata), .s_axis_tkeep(axis_dma_tkeep), .s_axis_tlast(axis_dma_tlast),
+    .m_axis_tvalid(axis_dwc_tvalid), .m_axis_tready(axis_dwc_tready), .m_axis_tdata(axis_dwc_tdata), .m_axis_tkeep(axis_dwc_tkeep), .m_axis_tlast(axis_dwc_tlast)
+);"""
+            else:
+                dwc_inst = """%s inst_dwc (
+    .aclk(ap_clk), .aresetn(ap_rst_n),
+    .s_axis_tvalid(axis_dma_tvalid), .s_axis_tready(axis_dma_tready), .s_axis_tdata(axis_dma_tdata), .s_axis_tkeep(axis_dma_tkeep), .s_axis_tlast(axis_dma_tlast),
+    .m_axis_tvalid(axis_dwc_tvalid), .m_axis_tready(axis_dwc_tready), .m_axis_tdata(axis_dwc_tdata), .m_axis_tkeep(axis_dwc_tkeep), .m_axis_tlast(axis_dwc_tlast)
+);""" % (mname + "_dwc")
 
             code_gen_dict = {
                 "$MODULE_NAME_AXI_WRAPPER$": [mname + "_fetch_weights_wrapper"],
@@ -413,8 +430,10 @@ class HWCustomOp(CustomOp):
                 "$TH$": [str(theight)],
                 "$IWSIMD$": [str(iwsimd)],
                 "$WSIMD$": [str(wsimd)],
+                "$RAM_STYLE$": [ram_style],
                 "$EN_MLO$": [en_mlo],
                 "$DWC_MODULE_NAME$": [mname + "_dwc"],
+                "$DWC_INST$": [dwc_inst],
             }
             # apply code generation to template
             with open(template_path, "r") as f:
@@ -441,6 +460,7 @@ class HWCustomOp(CustomOp):
         mh = self.get_nodeattr("MH")
         mw = self.get_nodeattr("MW")
         code_gen_dir = self.get_nodeattr("code_gen_dir_ipgen")
+        ram_style = '"{}"'.format(self.get_nodeattr("ram_style"))
 
         code_gen_dict = {
             "$MODULE_NAME$": [mname],
@@ -450,6 +470,7 @@ class HWCustomOp(CustomOp):
             "$MW$": [str(mw)],
             "$WEIGHT_WIDTH$": [str(self.get_input_datatype(1).bitwidth())],
             "$N_REPS$": [str(self.get_nodeattr("numInputVectors")[-1])],
+            "$RAM_STYLE$": [ram_style],
         }
         # apply code generation to template
         with open(template_path, "r") as f:

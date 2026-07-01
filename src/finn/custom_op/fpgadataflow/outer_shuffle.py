@@ -77,6 +77,7 @@ class OuterShuffle(HWCustomOp):
             "loop_coeffs": ("ints", True, []),
             "perm": ("ints", True, []),
             "SIMD": ("i", False, 1),
+            "ram_style": ("s", False, "auto", {"auto", "block", "ultra"}),
             "NumChannels": ("i", False, 128),
             "original_node_name": ("s", False, ""),  # Track original shuffle name for SIMD config
             "original_simd": ("i", False, 1),  # Track original shuffle SIMD for config export
@@ -146,44 +147,45 @@ class OuterShuffle(HWCustomOp):
         folded_ishape = normal_ishape[:-1] + [fold, simd]
         return tuple(folded_ishape)
 
+    def get_input_gen_params(self):
+        """Return input_gen total element count and interleaved loop parameters."""
+        simd = self.get_nodeattr("SIMD")
+        out_shape = list(self.get_nodeattr("transpose_out_shape"))
+        out_shape[-1] = int(out_shape[-1] / simd)
+        lc = [1 if x == 1 else int(x / simd) for x in self.get_nodeattr("loop_coeffs")]
+        total_elems = int(np.prod(out_shape))
+
+        # Build the Nest args: Nest<true, IFM_SIZE, N0, C0, N1, C1, ..., Nn, Cn>
+        interleaved = [int(item) for pair in zip(out_shape, lc) for item in pair]
+        return total_elems, interleaved
+
+    def get_input_gen_buf_size(self):
+        """Return the static input_gen reorder buffer depth."""
+        total_elems, interleaved = self.get_input_gen_params()
+        nest = _NestSim(True, total_elems, *tuple(interleaved))
+        wp_delay = 4
+        addr_bits = max(1, math.ceil(math.log2(max(1, nest.max_rp_retract + wp_delay + 2))))
+        return 1 << addr_bits
+
+    def get_input_gen_buf_bits(self):
+        """Return the static input_gen reorder buffer capacity in bits."""
+        return self.get_input_gen_buf_size() * self.get_instream_width()
+
     def get_exp_cycles(self):
         """Estimate cycles by simulating the input_gen HLS pipeline.
-
-        Derives all parameters from transpose_in_shape, perm, and SIMD:
-        - output shape: apply perm to input shape
-        - loop coefficients: input strides permuted by perm
-        - buffer size: power-of-2 >= max_rp_retract + WP_DELAY + 2
 
         The HLS pipeline has three stall sources:
         1. WP_DELAY (=4): write-pointer pipeline latency before reads begin
         2. Read stalls: consumer waits for data (rp >= wp_delayed)
         3. Write stalls: producer blocked by full buffer (wp - fp >= buf_size)
 
-        When buf_size > 262144 (URAM), pipeline II=3 due to read latency.
+        When the buffer is implemented in URAM, pipeline II=3 due to read latency.
         """
-        simd = self.get_nodeattr("SIMD")
-        in_shape = list(self.get_nodeattr("transpose_in_shape"))
-        perm = list(self.get_nodeattr("perm"))
-
-        # Derive output shape and loop coefficients from input shape and perm
-        out_shape = [in_shape[p] for p in perm]
-        adjusted = in_shape + [1]
-        input_strides = [int(np.prod(adjusted[i + 1 :])) for i in range(len(in_shape))]
-        loop_coeffs = [input_strides[p] for p in perm]
-
-        # Apply SIMD folding to innermost dimension
-        out_shape[-1] = int(out_shape[-1] / simd)
-        lc = [1 if x == 1 else int(x / simd) for x in loop_coeffs]
-        total_elems = int(np.prod(out_shape))
-
-        # Build the Nest args: Nest<true, IFM_SIZE, N0, C0, N1, C1, ..., Nn, Cn>
-        interleaved = [int(item) for pair in zip(out_shape, lc) for item in pair]
+        total_elems, interleaved = self.get_input_gen_params()
+        buf_size = self.get_input_gen_buf_size()
 
         # Create Nest simulation and compute buffer size
         nest = _NestSim(True, total_elems, *tuple(interleaved))
-        WP_DELAY = 4
-        addr_bits = max(1, math.ceil(math.log2(max(1, nest.max_rp_retract + WP_DELAY + 2))))
-        buf_size = 1 << addr_bits
 
         # Check vivado version
         vivado_path = os.environ.get("XILINX_VIVADO")
@@ -192,14 +194,15 @@ class OuterShuffle(HWCustomOp):
         if (year, minor) < (2024, 2):
             pipeline_ii = 1
         else:
-            # Pipeline II: BRAM (depth <= 262144) achieves II=1;
-            # URAM (depth > 262144) has read latency=3, forcing II=3.
+            # Pipeline II: BRAM achieves II=1; URAM has read latency=3.
             URAM_DEPTH_THRESHOLD = 262144
-            pipeline_ii = 3 if buf_size > URAM_DEPTH_THRESHOLD else 1
+            ram_style = self.get_nodeattr("ram_style")
+            pipeline_ii = 3 if ram_style == "ultra" or buf_size > URAM_DEPTH_THRESHOLD else 1
 
         # Simulate the input_gen pipeline at II=1.
         # Models the wp delay pipeline, finite buffer backpressure,
         # and the Nest-driven read pointer pattern.
+        WP_DELAY = 4
         wp = [0] * WP_DELAY
         rp = 0
         fp = 0

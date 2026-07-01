@@ -38,6 +38,7 @@ module $MODULE_NAME$_dynamic_load_wrapper #(
 
 	parameter	WEIGHT_WIDTH = $WEIGHT_WIDTH$,
 	parameter   N_REPS = $N_REPS$,
+    parameter   RAM_STYLE = $RAM_STYLE$,
 
 	// Safely deducible parameters
 	parameter	INPUT_STREAM_WIDTH_BA = (PE*WEIGHT_WIDTH+7)/8 * 8,
@@ -68,7 +69,8 @@ dynamic_load #(
 	.MW(MW),
 	.MH(MH),
 	.WEIGHT_WIDTH(WEIGHT_WIDTH),
-	.N_REPS(N_REPS)
+	.N_REPS(N_REPS),
+    .RAM_STYLE(RAM_STYLE)
 ) inst (
 	.ap_clk(ap_clk),
 	.ap_rst_n(ap_rst_n),

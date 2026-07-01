@@ -150,7 +150,8 @@ class MVAU_rtl(MVAU, RTLBackend):
         Q = self.get_nodeattr("SIMD")
         dsp_block = get_dsp_block(fpgapart)
         if dsp_block == "DSP58":
-            mult_dsp = P * np.ceil(Q / 3)
+            simd_per_dsp = 6 if self.get_nodeattr("pumpedCompute") else 3
+            mult_dsp = P * np.ceil(Q / simd_per_dsp)
         else:
             mult_dsp = np.ceil(P / 4) * Q
         return int(mult_dsp)
@@ -261,9 +262,18 @@ class MVAU_rtl(MVAU, RTLBackend):
         consider lowering the targeted clock frequency!""".format(
             ref_clk
         )
-        critical_path_dsps = np.floor((ref_clk - 0.741) / 0.605 + 1)
-        max_chain_len = np.ceil(self.get_nodeattr("SIMD") / simd_factor)
-        dsp_chain_len = critical_path_dsps if critical_path_dsps < max_chain_len else max_chain_len
+        critical_path_dsps = int(np.floor((ref_clk - 0.741) / 0.605 + 1))
+        max_chain_len = int(np.ceil(self.get_nodeattr("SIMD") / simd_factor))
+        dsp_chain_len = min(critical_path_dsps, max_chain_len)
+        segment_len_max = os.environ.get("FINN_MVAU_SEGMENTLEN_MAX")
+        if segment_len_max is not None:
+            try:
+                segment_len_max = int(segment_len_max)
+            except ValueError as exc:
+                raise ValueError("FINN_MVAU_SEGMENTLEN_MAX must be a positive integer") from exc
+            if segment_len_max < 1:
+                raise ValueError("FINN_MVAU_SEGMENTLEN_MAX must be a positive integer")
+            dsp_chain_len = min(dsp_chain_len, segment_len_max)
         return dsp_chain_len
 
     def _resolve_dsp_version(self, dsp_block):

@@ -626,7 +626,10 @@ compilation transformations?
         instream = self.get_instream_width()
         outstream = self.get_outstream_width()
         ret = max([instream, outstream])
-        assert ret <= 8191, "AP_INT_MAX_W=%d is larger than allowed maximum of 8191" % ret
+        assert ret <= 8191, (
+            f"{self.onnx_node.name}: AP_INT_MAX_W={ret} is larger than allowed "
+            f"maximum of 8191; instream={instream}, outstream={outstream}"
+        )
         return ret
 
     def timeout_value(self):

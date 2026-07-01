@@ -37,6 +37,12 @@ RESOURCE_ATTR_VALUES = {
 }
 
 
+def _prepare_inst_for_res_estimation(inst, model):
+    update_threshold_channels = getattr(inst, "update_num_threshold_channels_from_model", None)
+    if update_threshold_channels is not None:
+        update_threshold_channels(model)
+
+
 def res_estimation(model, fpgapart):
     """Estimates the resources needed for the given model.
     Ensure that all nodes have unique names (by calling the GiveUniqueNodeNames
@@ -49,6 +55,7 @@ def res_estimation(model, fpgapart):
     for node in model.graph.node:
         if is_hls_node(node) or is_rtl_node(node):
             inst = getHWCustomOp(node, model)
+            _prepare_inst_for_res_estimation(inst, model)
             res_dict[node.name] = inst.node_res_estimation(fpgapart)
 
     return res_dict
@@ -110,6 +117,7 @@ def res_estimation_complete(model, fpgapart):
     for node in model.graph.node:
         if is_hls_node(node) or is_rtl_node(node):
             inst = getHWCustomOp(node, model)
+            _prepare_inst_for_res_estimation(inst, model)
             res_dict[node.name] = _estimate_all_resource_variants(inst, fpgapart)
 
     return res_dict
