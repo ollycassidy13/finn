@@ -42,13 +42,13 @@ from finn.custom_op.fpgadataflow.rtl.layernorm_rtl import LayerNorm_rtl
 from finn.custom_op.fpgadataflow.rtl.matrixvectoractivation_rtl import MVAU_rtl
 from finn.custom_op.fpgadataflow.rtl.pwpolyf_rtl import PWPolyF_rtl
 from finn.custom_op.fpgadataflow.rtl.requant_rtl import Requant_rtl
-from finn.custom_op.fpgadataflow.rtl.selecttoken_rtl import SelectToken_rtl
 from finn.custom_op.fpgadataflow.rtl.streamingdatawidthconverter_rtl import (
     StreamingDataWidthConverter_rtl,
 )
 from finn.custom_op.fpgadataflow.rtl.streamingfifo_rtl import StreamingFIFO_rtl
 from finn.custom_op.fpgadataflow.rtl.thresholding_rtl import Thresholding_rtl
 from finn.custom_op.fpgadataflow.rtl.vectorvectoractivation_rtl import VVAU_rtl
+from finn.custom_op.fpgadataflow.rtl.where_rtl import Where_rtl
 
 custom_op = dict()
 
@@ -63,12 +63,12 @@ custom_op["LayerNorm_rtl"] = LayerNorm_rtl
 custom_op["StreamingDataWidthConverter_rtl"] = StreamingDataWidthConverter_rtl
 custom_op["StreamingFIFO_rtl"] = StreamingFIFO_rtl
 custom_op["MVAU_rtl"] = MVAU_rtl
-custom_op["SelectToken_rtl"] = SelectToken_rtl
 custom_op["VVAU_rtl"] = VVAU_rtl
 custom_op["PWPolyF_rtl"] = PWPolyF_rtl
 custom_op["Thresholding_rtl"] = Thresholding_rtl
 custom_op["HWSoftmax_rtl"] = HWSoftmax_rtl
 custom_op["InnerShuffle_rtl"] = InnerShuffle_rtl
 custom_op["Requant_rtl"] = Requant_rtl
+custom_op["Where_rtl"] = Where_rtl
 
 custom_op["FINNLoop"] = FINNLoop

@@ -30,7 +30,7 @@
 import numpy as np
 import qonnx.core.data_layout as DataLayout
 import warnings
-from onnx import NodeProto, TensorProto, helper
+from onnx import AttributeProto, NodeProto, TensorProto, helper
 from qonnx.core.datatype import DataType
 
 # QONNX wrapper to ONNX model graphs
@@ -1474,86 +1474,6 @@ class InferConcatLayer(Transformation):
         return (model, graph_modified)
 
 
-class InferSelectTokenLayer(Transformation):
-    """Convert scalar Gather(input, token_index, axis=1) into SelectToken."""
-
-    def apply(self, model):
-        graph = model.graph
-        node_ind = 0
-        graph_modified = False
-        for node in graph.node:
-            node_ind += 1
-            if node.op_type != "Gather":
-                continue
-
-            axis = get_by_name(node.attribute, "axis")
-            if axis is None or len(node.input) != 2:
-                continue
-
-            seq_name = node.input[0]
-            idx_name = node.input[1]
-            idx_init = model.get_initializer(idx_name)
-            if idx_init is None or idx_init.size != 1:
-                continue
-            if model.get_initializer(seq_name) is not None:
-                continue
-
-            seq_shape = model.get_tensor_shape(seq_name)
-            if seq_shape is None or any(x is None for x in seq_shape):
-                continue
-
-            rank = len(seq_shape)
-            gather_axis = axis.i if axis.i >= 0 else axis.i + rank
-            if rank != 3 or gather_axis != 1:
-                continue
-
-            token_index = int(idx_init.flatten()[0])
-            num_tokens = int(seq_shape[1])
-            if token_index < 0:
-                token_index += num_tokens
-            if token_index < 0 or token_index >= num_tokens:
-                continue
-
-            out_shape = model.get_tensor_shape(node.output[0])
-            exp_oshape = [int(seq_shape[0]), int(seq_shape[2])]
-            if out_shape is not None and list(out_shape) != exp_oshape:
-                continue
-            if seq_shape[0] != 1:
-                continue
-
-            idt = model.get_tensor_datatype(seq_name)
-            if idt is None or not idt.is_integer():
-                continue
-            odt = model.get_tensor_datatype(node.output[0])
-            if odt is None:
-                odt = idt
-            elif odt != idt:
-                continue
-
-            new_node = helper.make_node(
-                "SelectToken",
-                [seq_name],
-                node.output,
-                domain="finn.custom_op.fpgadataflow",
-                backend="fpgadataflow",
-                name="SelectToken_" + node.name,
-                NumTokens=num_tokens,
-                NumChannels=int(seq_shape[2]),
-                TokenIndex=token_index,
-                SIMD=1,
-                inputDataType=idt.name,
-                outputDataType=odt.name,
-            )
-            graph.node.insert(node_ind, new_node)
-            graph.node.remove(node)
-            graph_modified = True
-
-        if graph_modified:
-            model = model.transform(InferShapes())
-            model = model.transform(InferDataTypes())
-        return (model, graph_modified)
-
-
 class InferSplitLayer(Transformation):
     """Convert suitable Split nodes (operating on last/-1 axis)
     into StreamingConcat HW layers."""
@@ -1616,6 +1536,114 @@ class InferSplitLayer(Transformation):
                 # remove old node
                 graph.node.remove(node)
                 graph_modified = True
+
+        if graph_modified:
+            model = model.transform(InferShapes())
+            model = model.transform(InferDataTypes())
+        return (model, graph_modified)
+
+
+class InferWhereLayer(Transformation):
+    """Convert ONNX Where(condition, X, Y) into a streaming Where layer."""
+
+    @staticmethod
+    def _warn_skip(node, reason):
+        node_name = node.name if node.name else "<unnamed Where>"
+        warnings.warn("%s: %s. Can't infer Where layer." % (node_name, reason))
+
+    def apply(self, model):
+        graph = model.graph
+        node_ind = 0
+        graph_modified = False
+        for node in graph.node:
+            node_ind += 1
+            # The empty and explicit ai.onnx domains both denote standard ONNX ops.
+            if node.op_type != "Where" or node.domain not in ["", "ai.onnx"]:
+                continue
+            if len(node.input) != 3:
+                self._warn_skip(node, "Expected exactly three inputs")
+                continue
+
+            cond_name, x_name, y_name = node.input
+            if any(model.get_initializer(inp) is not None for inp in node.input):
+                self._warn_skip(node, "Initializer inputs are not supported by the streaming op")
+                continue
+
+            cond_shape = model.get_tensor_shape(cond_name)
+            x_shape = model.get_tensor_shape(x_name)
+            y_shape = model.get_tensor_shape(y_name)
+            out_shape = model.get_tensor_shape(node.output[0])
+            if any(s is None for s in [cond_shape, x_shape, y_shape, out_shape]):
+                self._warn_skip(node, "Input and output shapes must be known")
+                continue
+            all_dims = list(cond_shape) + list(x_shape) + list(y_shape) + list(out_shape)
+            if any(x is None for x in all_dims):
+                self._warn_skip(node, "Dynamic dimensions are not supported")
+                continue
+            try:
+                broadcast_shape = np.broadcast_shapes(
+                    tuple(cond_shape), tuple(x_shape), tuple(y_shape)
+                )
+            except ValueError:
+                self._warn_skip(node, "Input shapes are not broadcast-compatible")
+                continue
+            if list(out_shape) != [int(x) for x in broadcast_shape]:
+                self._warn_skip(node, "Output shape does not match the broadcast input shape")
+                continue
+            x_dt = model.get_tensor_datatype(x_name)
+            y_dt = model.get_tensor_datatype(y_name)
+            if x_dt is None or y_dt is None or x_dt != y_dt:
+                self._warn_skip(node, "X and Y must have the same known datatype")
+                continue
+            supported_dt = (
+                x_dt.is_integer()
+                or x_dt.is_fixed_point()
+                or x_dt in [DataType["FLOAT32"], DataType["FLOAT16"]]
+            )
+            if not supported_dt:
+                self._warn_skip(node, "X and Y datatype %s is not supported" % str(x_dt))
+                continue
+            out_dt = model.get_tensor_datatype(node.output[0])
+            if out_dt is not None and out_dt != x_dt:
+                self._warn_skip(node, "Output datatype must match X and Y")
+                continue
+
+            cond_dt = model.get_tensor_datatype(cond_name)
+            if cond_dt is None:
+                model.set_tensor_datatype(cond_name, DataType["BINARY"])
+                cond_dt = DataType["BINARY"]
+            if cond_dt != DataType["BINARY"]:
+                self._warn_skip(node, "Condition datatype must be BINARY")
+                continue
+
+            new_node = helper.make_node(
+                "Where",
+                node.input,
+                node.output,
+                domain="finn.custom_op.fpgadataflow",
+                backend="fpgadataflow",
+                name="Where_" + node.name,
+                CondRank=len(cond_shape),
+                XRank=len(x_shape),
+                YRank=len(y_shape),
+                PE=1,
+                conditionDataType=cond_dt.name,
+                inputDataType=x_dt.name,
+                outputDataType=x_dt.name,
+                inFIFODepths=[2, 2, 2],
+            )
+            for attr_name, attr_value in [
+                ("Shape", [int(x) for x in broadcast_shape]),
+                ("CondShape", [int(x) for x in cond_shape]),
+                ("XShape", [int(x) for x in x_shape]),
+                ("YShape", [int(x) for x in y_shape]),
+            ]:
+                new_node.attribute.append(
+                    helper.make_attribute(attr_name, attr_value, attr_type=AttributeProto.INTS)
+                )
+            graph.node.insert(node_ind, new_node)
+            graph.node.remove(node)
+            graph_modified = True
 
         if graph_modified:
             model = model.transform(InferShapes())
