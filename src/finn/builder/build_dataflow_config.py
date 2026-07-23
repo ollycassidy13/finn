@@ -380,6 +380,11 @@ class DataflowBuildConfig:
     #: Does not affect FIFO sizing which always uses behavioral simulation.
     verify_rtlsim_behavioral: Optional[bool] = False
 
+    #: Optional liveness watchdog override, in cycles, for stitched-IP rtlsim
+    #: verification. If unset, FINN derives the watchdog from the performance
+    #: estimate for the graph.
+    stitched_rtlsim_liveness_threshold: Optional[int] = None
+
     #: If set to True, the FINN compiler tries to create an MLO design based on
     #: loop_body_hierarchy and loop_body_range
     mlo: Optional[bool] = False
