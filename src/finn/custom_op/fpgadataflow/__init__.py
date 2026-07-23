@@ -71,6 +71,7 @@ from finn.custom_op.fpgadataflow.outer_shuffle import OuterShuffle
 from finn.custom_op.fpgadataflow.pool import Pool
 from finn.custom_op.fpgadataflow.pwpolyf import PWPolyF
 from finn.custom_op.fpgadataflow.requant import Requant
+from finn.custom_op.fpgadataflow.selecttoken import SelectToken
 from finn.custom_op.fpgadataflow.shuffle import Shuffle
 from finn.custom_op.fpgadataflow.split import StreamingSplit
 from finn.custom_op.fpgadataflow.streamingdataflowpartition import (
@@ -105,6 +106,7 @@ custom_op["Lookup"] = Lookup
 custom_op["OuterShuffle"] = OuterShuffle
 custom_op["Pool"] = Pool
 custom_op["PWPolyF"] = PWPolyF
+custom_op["SelectToken"] = SelectToken
 custom_op["Shuffle"] = Shuffle
 custom_op["StreamingConcat"] = StreamingConcat
 custom_op["StreamingSplit"] = StreamingSplit
