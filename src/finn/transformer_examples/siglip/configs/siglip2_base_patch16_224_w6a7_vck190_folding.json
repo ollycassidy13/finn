@@ -58,7 +58,7 @@
     "mem_mode": "internal_decoupled",
     "runtime_writeable_weights": 0
   },
-    "FINNLoop_0_body_FINNLoop_0_DuplicateStreams_hls_0": {
+    "FINNLoop_0_body_FINNLoop_0_DuplicateStreams_rtl_0": {
     "PE": 1
   },
   "FINNLoop_0_body_FINNLoop_0_LayerNorm_rtl_0": {
@@ -82,7 +82,7 @@
     "depth_trigger_uram": 0,
     "depth_trigger_bram": 0
   },
-    "FINNLoop_0_body_FINNLoop_0_DuplicateStreams_hls_1": {
+    "FINNLoop_0_body_FINNLoop_0_DuplicateStreams_rtl_1": {
     "PE": 1
   },
   "FINNLoop_0_body_FINNLoop_0_MVAU_rtl_0": {
@@ -247,7 +247,7 @@
     "mem_mode": "internal_decoupled",
     "runtime_writeable_weights": 0
   },
-    "FINNLoop_0_body_FINNLoop_0_DuplicateStreams_hls_2": {
+    "FINNLoop_0_body_FINNLoop_0_DuplicateStreams_rtl_2": {
     "PE": 1
   },
   "FINNLoop_0_body_FINNLoop_0_LayerNorm_rtl_1": {
@@ -292,7 +292,7 @@
     "mem_mode": "internal_decoupled",
     "runtime_writeable_weights": 0
   },
-    "FINNLoop_0_body_FINNLoop_0_DuplicateStreams_hls_3": {
+    "FINNLoop_0_body_FINNLoop_0_DuplicateStreams_rtl_3": {
     "PE": 4
   },
   "FINNLoop_0_body_FINNLoop_0_ElementwiseMul_rtl_8": {
@@ -388,7 +388,7 @@
     "mem_mode": "internal_decoupled",
     "runtime_writeable_weights": 0
   },
-    "DuplicateStreams_hls_0": {
+    "DuplicateStreams_rtl_0": {
     "PE": 1
   },
   "Thresholding_rtl_1": {
@@ -527,7 +527,7 @@
     "mem_mode": "internal_decoupled",
     "runtime_writeable_weights": 0
   },
-    "DuplicateStreams_hls_1": {
+    "DuplicateStreams_rtl_1": {
     "PE": 1
   },
   "LayerNorm_rtl_1": {
@@ -572,7 +572,7 @@
     "mem_mode": "internal_decoupled",
     "runtime_writeable_weights": 0
   },
-    "DuplicateStreams_hls_2": {
+    "DuplicateStreams_rtl_2": {
     "PE": 1
   },
   "ElementwiseMul_rtl_8": {

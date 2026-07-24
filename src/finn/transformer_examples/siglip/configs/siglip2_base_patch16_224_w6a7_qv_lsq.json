@@ -32,18 +32,8 @@
       "top5_percent": 92.228,
       "scope": "QV-LSQ checkpoint with the static zero-shot comparison head"
     },
-    "finn_latency_model": {
-      "kind": "overlapped FINNLoop scheduler estimate",
-      "cycles": 7494993,
-      "clock_ns": 3.999,
-      "latency_ms": 29.972477007
-    },
-    "ooc_implementation": {
-      "device": "xcvc1902-vsva2197",
-      "route_clean": true,
-      "timing_met": true,
-      "clock_mhz": 250.062
-    },
+    "finn_latency_model": null,
+    "ooc_implementation": null,
     "board_runtime_throughput_fps": null,
     "ideal_memory_rtlsim_throughput_fps": null
   }

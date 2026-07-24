@@ -4,6 +4,7 @@
       "rtl",
       [
         "MVAU",
+        "DuplicateStreams",
         "HWSoftmax",
         "LayerNorm",
         "PWPolyF",

@@ -1,6 +1,7 @@
 # Copyright Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import json
 from types import SimpleNamespace
 
 import numpy as np
@@ -58,9 +59,19 @@ def test_default_profile_records_verified_w6a7_contract():
     }
     assert profile.model["output_name"] == "image_embeds"
     assert profile.reference_metrics["accuracy"]["images"] == 50_000
+    assert profile.reference_metrics["finn_latency_model"] is None
+    assert profile.reference_metrics["ooc_implementation"] is None
     assert profile.reference_metrics["board_runtime_throughput_fps"] is None
     assert profile.build["verification_atol"] == 0.25
     assert profile.resolve_file(profile.build["folding_config"]).is_file()
+
+    specialization_path = profile.resolve_file(profile.build["specialization_config"])
+    folding_path = profile.resolve_file(profile.build["folding_config"])
+    specialization = json.loads(specialization_path.read_text())
+    folding = json.loads(folding_path.read_text())
+    assert "DuplicateStreams" in specialization["Defaults"]["preferred_impl_style"][1]
+    assert any("DuplicateStreams_rtl" in key for key in folding)
+    assert not any("DuplicateStreams_hls" in key for key in folding)
 
 
 def test_profile_rejects_unvalidated_board(tmp_path):

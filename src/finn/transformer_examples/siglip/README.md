@@ -139,8 +139,8 @@ model.
 | --- | ---: | --- |
 | ImageNet-1K top-1 | 72.472% | 50,000 images, static zero-shot comparison head |
 | ImageNet-1K top-5 | 92.228% | same evaluation |
-| FINN modeled latency | 29.972477007 ms | 7,494,993 cycles at 3.999 ns, overlapped MLO schedule |
-| VCK190 OOC timing | met at 250.062 MHz | routed, zero route errors |
+| FINN modeled latency | not measured | no current-profile scheduler result is claimed |
+| VCK190 OOC timing | not measured | run the OOC flow above to produce current reports |
 | Board-runtime throughput | not measured | no board run is claimed |
 | Ideal-memory RTL throughput | not measured | enable `--measure-rtlsim-performance` to produce it |
 
