@@ -21,7 +21,10 @@ from finn.builder.build_dataflow_config import (
     estimate_only_dataflow_steps,
 )
 from finn.transformer_examples.siglip.config import DEFAULT_PROFILE, SiglipProfile, load_profile
-from finn.transformer_examples.siglip.mlo import make_mlo_boundary_step
+from finn.transformer_examples.siglip.mlo import (
+    make_mlo_boundary_step,
+    step_round_siglip_thresholds_before_mlo,
+)
 from finn.transformer_examples.siglip.phases import (
     make_siglip_folding_step,
     phase_optimize_siglip,
@@ -186,7 +189,10 @@ def build_siglip(
         loop_body_range=[],
         loop_body_hierarchy=[["", "layers.0"]],
         inject_steps_before={
-            "step_loop_rolling": [make_mlo_boundary_step(profile.model["vision_depth"])]
+            "step_loop_rolling": [
+                step_round_siglip_thresholds_before_mlo,
+                make_mlo_boundary_step(profile.model["vision_depth"]),
+            ]
         },
         inject_steps_after={
             "step_target_fps_parallelization": [pre_decomposition_folding],

@@ -10,6 +10,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from finn.transformation.streamline.round_thresholds import RoundAndClipThresholds
+
 
 def _is_layer_norm(node: Any) -> bool:
     return node.op_type == "LayerNormalization" or node.op_type.startswith("LayerNorm")
@@ -73,6 +75,12 @@ def find_vision_loop_body_ranges(model: Any, depth: int) -> list[dict[str, Any]]
             }
         )
     return ranges
+
+
+def step_round_siglip_thresholds_before_mlo(model, cfg):
+    """Preserve integer threshold types when repeated blocks become loop parameters."""
+
+    return model.transform(RoundAndClipThresholds())
 
 
 def make_mlo_boundary_step(depth: int):

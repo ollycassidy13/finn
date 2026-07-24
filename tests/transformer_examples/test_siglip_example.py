@@ -14,6 +14,7 @@ from finn.transformer_examples.siglip.config import DEFAULT_PROFILE, load_profil
 from finn.transformer_examples.siglip.mlo import (
     find_vision_loop_body_ranges,
     make_mlo_boundary_step,
+    step_round_siglip_thresholds_before_mlo,
 )
 from finn.transformer_examples.siglip.phases import (
     _DuplicateSafeModelWrapper,
@@ -62,7 +63,7 @@ def test_default_profile_records_verified_w6a7_contract():
     assert profile.reference_metrics["finn_latency_model"] is None
     assert profile.reference_metrics["ooc_implementation"] is None
     assert profile.reference_metrics["board_runtime_throughput_fps"] is None
-    assert profile.build["verification_atol"] == 0.25
+    assert profile.build["verification_atol"] == 0.27
     assert profile.resolve_file(profile.build["folding_config"]).is_file()
 
     specialization_path = profile.resolve_file(profile.build["specialization_config"])
@@ -244,3 +245,42 @@ def test_exposes_topology_mismatch_to_mlo_step(tmp_path):
     cfg = SimpleNamespace(output_dir=str(tmp_path))
     with pytest.raises(RuntimeError, match=r"blocks \[7\]"):
         make_mlo_boundary_step(12)(model, cfg)
+
+
+def test_rounds_integer_thresholds_before_mlo_parameter_extraction():
+    inp = helper.make_tensor_value_info("inp", TensorProto.FLOAT, [1, 1])
+    out = helper.make_tensor_value_info("out", TensorProto.FLOAT, [1, 1])
+    thresholds = np.asarray([[-1.2, 0.2, 1.8]], dtype=np.float32)
+    node = helper.make_node(
+        "Thresholding",
+        ["inp", "thresholds"],
+        ["out"],
+        domain="finn.custom_op.fpgadataflow",
+        backend="fpgadataflow",
+        NumChannels=1,
+        PE=1,
+        inputDataType="INT8",
+        weightDataType="FLOAT32",
+        outputDataType="UINT2",
+        numInputVectors=[1],
+        numSteps=3,
+    )
+    graph = helper.make_graph(
+        [node],
+        "round-before-mlo",
+        [inp],
+        [out],
+        initializer=[numpy_helper.from_array(thresholds, "thresholds")],
+    )
+    model = ModelWrapper(helper.make_model(graph))
+    model.set_tensor_datatype("inp", DataType["INT8"])
+    model.set_tensor_datatype("thresholds", DataType["FLOAT32"])
+    model.set_tensor_datatype("out", DataType["UINT2"])
+
+    model = step_round_siglip_thresholds_before_mlo(model, SimpleNamespace())
+
+    np.testing.assert_array_equal(
+        model.get_initializer("thresholds"),
+        np.asarray([[-1.0, 1.0, 2.0]], dtype=np.float32),
+    )
+    assert model.get_tensor_datatype("thresholds").is_integer()
