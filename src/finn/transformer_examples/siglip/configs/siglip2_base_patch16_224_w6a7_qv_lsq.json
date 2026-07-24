@@ -1,0 +1,50 @@
+{
+  "name": "siglip2-base-patch16-224-w6a7-qv-lsq-vck190",
+  "model": {
+    "model_id": "google/siglip2-base-patch16-224",
+    "scope": "SigLIP image tower; an exported comparison head is cropped before FINN",
+    "vision_depth": 12,
+    "image_size": 224,
+    "patch_size": 16,
+    "image_tokens": 196,
+    "output_name": "image_embeds"
+  },
+  "quantization": {
+    "scheme": "qv_lsq",
+    "weight_bits": 6,
+    "activation_bits": 7,
+    "edge_bits": 8
+  },
+  "build": {
+    "board": "VCK190",
+    "clock_ns": 3.999,
+    "target_fps": 1200,
+    "mvau_wwidth_max": 72,
+    "verification_atol": 0.25,
+    "specialization_config": "siglip2_base_patch16_224_w6a7_vck190_specialization.json",
+    "folding_config": "siglip2_base_patch16_224_w6a7_vck190_folding.json"
+  },
+  "reference_metrics": {
+    "accuracy": {
+      "dataset": "ImageNet-1K validation",
+      "images": 50000,
+      "top1_percent": 72.472,
+      "top5_percent": 92.228,
+      "scope": "QV-LSQ checkpoint with the static zero-shot comparison head"
+    },
+    "finn_latency_model": {
+      "kind": "overlapped FINNLoop scheduler estimate",
+      "cycles": 7494993,
+      "clock_ns": 3.999,
+      "latency_ms": 29.972477007
+    },
+    "ooc_implementation": {
+      "device": "xcvc1902-vsva2197",
+      "route_clean": true,
+      "timing_met": true,
+      "clock_mhz": 250.062
+    },
+    "board_runtime_throughput_fps": null,
+    "ideal_memory_rtlsim_throughput_fps": null
+  }
+}
