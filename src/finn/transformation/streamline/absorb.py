@@ -71,30 +71,32 @@ class AbsorbSignBiasIntoMultiThreshold(Transformation):
                     if not is_scalar:
                         continue
                     bias = A.flatten()[0]
-                    # set MultiThreshold bias property
                     mt_inst = getCustomOp(mt_node)
                     bias += mt_inst.get_nodeattr("out_bias")
-                    mt_inst.set_nodeattr("out_bias", bias)
-                    graph_modified = True
                     # compute new DataType for MultiThreshold output
                     steps = T.shape[-1]
                     new_min = bias
                     new_max = steps + bias
-                    odt = DataType.get_smallest_possible(steps).name.replace("UINT", "INT")
-                    odt = DataType[odt]
-                    assert odt.allowed(new_max) and odt.allowed(
-                        new_min
-                    ), """Could
-                    not compute new MultiThreshold DataType (min = %d max = %d)""" % (
-                        new_min,
-                        new_max,
-                    )
+                    if int(new_min) != new_min or int(new_max) != new_max:
+                        continue
+                    for candidate in DataType.get_accumulator_dt_cands():
+                        odt = DataType[candidate]
+                        if odt.allowed(new_min) and odt.allowed(new_max):
+                            break
+                    else:
+                        raise AssertionError(
+                            "Could not compute new MultiThreshold DataType "
+                            f"(min = {new_min} max = {new_max})"
+                        )
+                    # set MultiThreshold bias property
+                    mt_inst.set_nodeattr("out_bias", bias)
                     mt_inst.set_nodeattr("out_dtype", odt.name)
                     # remove Add node, rewire MultiThreshold
                     graph.node.remove(add_node)
                     mt_node.output[0] = end_name
                     # set datatype
                     model.set_tensor_datatype(end_name, odt)
+                    graph_modified = True
         if graph_modified:
             model = model.transform(InferDataTypes())
         return (model, graph_modified)
