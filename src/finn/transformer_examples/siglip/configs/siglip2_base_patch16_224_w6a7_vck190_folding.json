@@ -554,7 +554,7 @@
   "MVAU_rtl_3": {
     "PE": 1,
     "SIMD": 12,
-    "ram_style": "block",
+    "ram_style": "ultra",
     "resType": "auto",
     "mem_mode": "external_mem",
     "runtime_writeable_weights": 0,
@@ -629,7 +629,7 @@
   "MVAU_rtl_4": {
     "PE": 1,
     "SIMD": 12,
-    "ram_style": "block",
+    "ram_style": "ultra",
     "resType": "auto",
     "mem_mode": "external_mem",
     "runtime_writeable_weights": 0,
