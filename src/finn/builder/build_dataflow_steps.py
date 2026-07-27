@@ -1358,7 +1358,9 @@ def step_measure_rtlsim_performance(model: ModelWrapper, cfg: DataflowBuildConfi
         prev_liveness = get_liveness_threshold_cycles()
         loop_nodes = rtlsim_model.get_nodes_by_op_type("FINNLoop")
         assert len(loop_nodes) == 1, "MLO RTLSIM performance currently supports one FINNLoop"
-        mlo_prehook = mlo_prehook_func_factory(loop_nodes[0])
+        mlo_prehook = mlo_prehook_func_factory(
+            loop_nodes[0], external_weight_data_pattern="all_zero"
+        )
         os.environ["LIVENESS_THRESHOLD"] = str(liveness_cycles)
         try:
             rtlsim_perf_dict = throughput_test_rtlsim(
@@ -1367,6 +1369,7 @@ def step_measure_rtlsim_performance(model: ModelWrapper, cfg: DataflowBuildConfi
                 batchsize=rtlsim_bs,
                 pre_hook=mlo_prehook,
                 collect_performance=True,
+                input_data_pattern="all_zero",
             )
         finally:
             os.environ["LIVENESS_THRESHOLD"] = str(prev_liveness)
@@ -1375,6 +1378,9 @@ def step_measure_rtlsim_performance(model: ModelWrapper, cfg: DataflowBuildConfi
         rtlsim_perf_dict["external_memory_model"] = "ideal_axi_mm"
         rtlsim_perf_dict["external_memory_model_is_ideal"] = True
         rtlsim_perf_dict["performance_interpretation"] = "ideal_memory_upper_bound"
+        rtlsim_perf_dict["input_data_pattern"] = "all_zero"
+        rtlsim_perf_dict["external_weight_data_pattern"] = "all_zero"
+        rtlsim_perf_dict["timing_schedule_is_data_independent"] = True
         rtlsim_perf_dict["io_bandwidth_scope"] = "top_level_axi_stream_only"
         rtlsim_perf_dict["external_memory_model_notes"] = (
             "AXI-MM accepts addresses without backpressure and returns up to one beat per "

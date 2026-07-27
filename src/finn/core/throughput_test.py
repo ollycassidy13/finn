@@ -39,20 +39,24 @@ def throughput_test_rtlsim(
     batchsize=100,
     pre_hook=None,
     collect_performance=False,
+    input_data_pattern="random",
 ):
     """Runs a throughput test for the given IP-stitched model. When combined
     with tracing, useful to determine bottlenecks and required FIFO sizes.
     ``pre_hook`` can install models for non-stream interfaces. Enabling
     ``collect_performance`` derives sustained throughput from output-frame
     completion times rather than from pipeline-fill latency.
+    ``input_data_pattern`` selects random or deterministic all-zero inputs.
     """
 
     assert (
         model.get_metadata_prop("exec_mode") == "rtlsim"
     ), """Top-level exec_mode
     metadata_prop must be set to rtlsim"""
+    if input_data_pattern not in ("random", "all_zero"):
+        raise ValueError(f"Unsupported RTLSIM input data pattern: {input_data_pattern}")
 
-    # make empty exec context and insert random inputs
+    # make empty exec context and insert the requested input pattern
     ctx = model.make_empty_exec_context()
     i_bytes = 0
     for i_vi in model.graph.input:
@@ -62,7 +66,10 @@ def throughput_test_rtlsim(
         ishape_batch = list(ishape)
         ishape_batch[0] = batchsize
         idt = model.get_tensor_datatype(iname)
-        dummy_input = gen_finn_dt_tensor(idt, ishape_batch)
+        if input_data_pattern == "all_zero":
+            dummy_input = np.zeros(ishape_batch, dtype=np.float32)
+        else:
+            dummy_input = gen_finn_dt_tensor(idt, ishape_batch)
         ctx[iname] = dummy_input
         i_bytes += (np.prod(ishape_batch) * idt.bitwidth()) / 8
 

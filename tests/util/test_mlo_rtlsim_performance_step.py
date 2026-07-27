@@ -2,8 +2,13 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import json
+from types import SimpleNamespace
+
+import numpy as np
 
 import finn.builder.build_dataflow_steps as steps
+import finn.core.throughput_test as throughput
+import finn.util.mlo_sim as mlo_sim
 from finn.builder.build_dataflow_config import DataflowBuildConfig, DataflowOutputType
 
 
@@ -60,7 +65,11 @@ def test_mlo_performance_step_uses_two_frames_and_ideal_memory(tmp_path, monkeyp
     monkeypatch.setattr(steps, "is_mlo", lambda _model: True)
     monkeypatch.setattr(steps, "deepcopy", lambda original: original)
     monkeypatch.setattr(steps, "prepare_for_stitched_ip_rtlsim", lambda original, _cfg: original)
-    monkeypatch.setattr(steps, "mlo_prehook_func_factory", lambda _node: prehook)
+    def fake_prehook_factory(_node, **kwargs):
+        call["prehook_kwargs"] = kwargs
+        return prehook
+
+    monkeypatch.setattr(steps, "mlo_prehook_func_factory", fake_prehook_factory)
     monkeypatch.setattr(steps, "get_liveness_threshold_cycles", lambda: 123)
 
     def fake_throughput_test(model_arg, clk_ns, **kwargs):
@@ -95,6 +104,8 @@ def test_mlo_performance_step_uses_two_frames_and_ideal_memory(tmp_path, monkeyp
     assert call["batchsize"] == 2
     assert call["pre_hook"] is prehook
     assert call["collect_performance"] is True
+    assert call["input_data_pattern"] == "all_zero"
+    assert call["prehook_kwargs"] == {"external_weight_data_pattern": "all_zero"}
 
     with open(tmp_path / "report" / "rtlsim_performance.json") as report_file:
         report = json.load(report_file)
@@ -102,5 +113,81 @@ def test_mlo_performance_step_uses_two_frames_and_ideal_memory(tmp_path, monkeyp
     assert report["external_memory_model"] == "ideal_axi_mm"
     assert report["external_memory_model_is_ideal"] is True
     assert report["performance_interpretation"] == "ideal_memory_upper_bound"
+    assert report["input_data_pattern"] == "all_zero"
+    assert report["external_weight_data_pattern"] == "all_zero"
+    assert report["timing_schedule_is_data_independent"] is True
     assert report["io_bandwidth_scope"] == "top_level_axi_stream_only"
     assert report["N"] == 2
+
+
+def test_throughput_test_can_use_all_zero_inputs(monkeypatch):
+    captured = {}
+
+    class FakeModel:
+        graph = SimpleNamespace(
+            input=[SimpleNamespace(name="inp")],
+            output=[],
+        )
+
+        def get_metadata_prop(self, name):
+            return {"exec_mode": "rtlsim", "cycles_rtlsim": "10"}[name]
+
+        def make_empty_exec_context(self):
+            return {}
+
+        def get_tensor_shape(self, _name):
+            return [1, 3]
+
+        def get_tensor_datatype(self, _name):
+            return SimpleNamespace(bitwidth=lambda: 8)
+
+    def fake_rtlsim_exec(_model, context, **_kwargs):
+        captured.update(context)
+        return {}
+
+    monkeypatch.setattr(throughput, "rtlsim_exec", fake_rtlsim_exec)
+
+    throughput.throughput_test_rtlsim(
+        FakeModel(),
+        clk_ns=5.0,
+        batchsize=2,
+        input_data_pattern="all_zero",
+    )
+
+    np.testing.assert_array_equal(captured["inp"], np.zeros((2, 3), dtype=np.float32))
+
+
+def test_mlo_prehook_can_zero_external_weights(tmp_path, monkeypatch):
+    body_input = SimpleNamespace(name="weights")
+    body = SimpleNamespace(
+        graph=SimpleNamespace(input=[body_input]),
+        find_consumer=lambda _name: SimpleNamespace(op_type="MVAU_rtl"),
+    )
+    attrs = {
+        "body": body,
+        "code_gen_dir_ipgen": str(tmp_path),
+        "iteration": 2,
+    }
+    loop = SimpleNamespace(get_nodeattr=lambda name: attrs[name])
+    monkeypatch.setattr(mlo_sim, "getCustomOp", lambda _node: loop)
+    (tmp_path / "memblock_MVAU_rtl_id_0.dat").write_text("010203\n040506\n")
+
+    captured = {}
+
+    class FakeSim:
+        def aximm_queue(self, name):
+            captured["queue"] = name
+
+        def aximm_ro_image(self, name, address, image):
+            captured.update(name=name, address=address, image=image)
+
+    prehook = mlo_sim.mlo_prehook_func_factory(
+        object(), external_weight_data_pattern="all_zero"
+    )
+    prehook(FakeSim())
+
+    assert captured["queue"] == "m_axi_hbm"
+    assert captured["name"] == "m_axi_MVAU_id_0"
+    assert captured["address"] == 0
+    assert captured["image"].shape == (64,)
+    assert np.all(captured["image"] == 0)
