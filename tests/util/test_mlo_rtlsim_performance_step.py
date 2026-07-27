@@ -19,6 +19,39 @@ class _FakeMLOModel:
         return [object()]
 
 
+class _FakeFIFO:
+    def __init__(self, impl_style):
+        self.impl_style = impl_style
+
+    def get_nodeattr(self, name):
+        assert name == "impl_style"
+        return self.impl_style
+
+    def set_nodeattr(self, name, value):
+        assert name == "impl_style"
+        self.impl_style = value
+
+
+class _FakeFIFOModel:
+    def __init__(self):
+        self.fifos = [_FakeFIFO("vivado"), _FakeFIFO("rtl")]
+
+    def get_nodes_by_op_type(self, op_type):
+        assert op_type == "StreamingFIFO_rtl"
+        return self.fifos
+
+
+def test_node_by_node_rtlsim_uses_rtl_fifo_copy(monkeypatch):
+    model = _FakeFIFOModel()
+    monkeypatch.setattr(steps, "getCustomOp", lambda node: node)
+
+    verify_model = steps.prepare_for_node_by_node_rtlsim(model)
+
+    assert verify_model is not model
+    assert [fifo.impl_style for fifo in model.fifos] == ["vivado", "rtl"]
+    assert [fifo.impl_style for fifo in verify_model.fifos] == ["rtl", "rtl"]
+
+
 def test_mlo_performance_step_uses_two_frames_and_ideal_memory(tmp_path, monkeypatch):
     model = _FakeMLOModel()
     prehook = object()
