@@ -216,6 +216,56 @@ def test_mvau_streamed_weight_characterization_supplies_weights(monkeypatch, mem
     assert len(captured["inputs"]["in1"]) == expected_weight_words
 
 
+def test_dynamic_mvau_packs_broadcast_weight_batches(tmp_path):
+    node = helper.make_node(
+        "MVAU_rtl",
+        ["inp", "weights"],
+        ["outp"],
+        name="MVAU_rtl_dynamic_test",
+        domain="finn.custom_op.fpgadataflow.rtl",
+        backend="fpgadataflow",
+        MW=2,
+        MH=3,
+        SIMD=1,
+        PE=1,
+        TH=1,
+        inputDataType="INT4",
+        weightDataType="INT4",
+        outputDataType="INT16",
+        noActivation=1,
+        numInputVectors=[1, 2, 3],
+        mem_mode="dynamic",
+    )
+    instance = MVAU_rtl(node)
+    weights = np.asarray(
+        [
+            [
+                [[0, 1, 2], [3, 4, 5]],
+                [[-6, -5, -4], [-3, -2, -1]],
+            ]
+        ],
+        dtype=np.float32,
+    )
+
+    expanded = instance.get_dynamic_weight_matrices(weights)
+
+    expected_matrices = np.repeat(weights.reshape(2, 2, 3), 3, axis=0)
+    np.testing.assert_array_equal(expanded, expected_matrices)
+
+    batched_path = tmp_path / "batched.npy"
+    instance.make_weight_file(expanded, "decoupled_npy", batched_path)
+    individually_packed = []
+    for index, matrix in enumerate(weights.reshape(2, 2, 3)):
+        single_path = tmp_path / f"single_{index}.npy"
+        instance.make_weight_file(matrix, "decoupled_npy", single_path)
+        individually_packed.append(np.load(single_path))
+    expected_packed = np.concatenate(
+        [individually_packed[0]] * 3 + [individually_packed[1]] * 3,
+        axis=1,
+    )
+    np.testing.assert_array_equal(np.load(batched_path), expected_packed)
+
+
 def make_dynamic_matmul_modelwrapper(ifm, wfm, ofm, idt, wdt):
     matmul_node = helper.make_node("MatMul", ["ifm", "wfm"], ["ofm"])
     graph = helper.make_graph(

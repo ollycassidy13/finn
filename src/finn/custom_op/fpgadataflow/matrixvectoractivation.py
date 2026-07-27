@@ -669,6 +669,30 @@ class MVAU(HWCustomOp):
         ret = np.flip(ret, axis=-1)
         return ret
 
+    def get_dynamic_weight_matrices(self, weights):
+        """Expand broadcast dynamic MatMul weights into activation-vector order."""
+
+        mw = self.get_nodeattr("MW")
+        mh = self.get_nodeattr("MH")
+        weights = np.asarray(weights)
+        assert weights.shape[-2:] == (mw, mh), (
+            f"Dynamic weights for {self.onnx_node.name} have trailing shape "
+            f"{weights.shape[-2:]}, expected {(mw, mh)}"
+        )
+
+        input_shape = tuple(self.get_normal_input_shape(0))
+        batch_shape = input_shape[:-2]
+        vectors_per_batch = input_shape[-2]
+        try:
+            broadcast_weights = np.broadcast_to(weights, batch_shape + (mw, mh))
+        except ValueError as error:
+            raise ValueError(
+                f"Dynamic weight batch shape {weights.shape[:-2]} cannot broadcast "
+                f"to activation batch shape {batch_shape} for {self.onnx_node.name}"
+            ) from error
+        weight_matrices = broadcast_weights.reshape(-1, mw, mh)
+        return np.repeat(weight_matrices, vectors_per_batch, axis=0)
+
     def make_weight_file(self, weights, weight_file_mode, weight_file_name):
         """Produce a file containing given weights in appropriate format for this
         layer. This file can be used for either synthesis or run-time reconfig
@@ -683,7 +707,15 @@ class MVAU(HWCustomOp):
 
         """
         # convert weights into hlslib/rtllib-compatible format
-        weight_tensor = self.get_hw_compatible_weight_tensor(weights)
+        if weight_file_mode == "decoupled_npy" and weights.ndim > 2:
+            mw = self.get_nodeattr("MW")
+            mh = self.get_nodeattr("MH")
+            assert weights.shape[-2:] == (mw, mh)
+            weight_tensor = np.concatenate(
+                [self.get_hw_compatible_weight_tensor(matrix) for matrix in weights], axis=0
+            )
+        else:
+            weight_tensor = self.get_hw_compatible_weight_tensor(weights)
         export_wdt = self.get_input_datatype(1)
         # we have converted bipolar weights to binary for export,
         # so use it as such for weight generation
