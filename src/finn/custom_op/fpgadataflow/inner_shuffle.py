@@ -40,6 +40,12 @@ class InnerShuffle(HWCustomOp):
     def execute_node(self, context, graph):
         node = self.onnx_node
         input_data = context[node.input[0]]
+        expected_shape = tuple(self.get_normal_input_shape())
+        if input_data.size != int(np.prod(expected_shape)):
+            raise RuntimeError(
+                f"{node.name}: cannot reshape input {input_data.shape} to {expected_shape}"
+            )
+        input_data = input_data.reshape(expected_shape)
         assert len(input_data.shape) >= 2, "InnerShuffle HWCustomOp requires at least 2D input"
         # Transpose only the last two dimensions: (..., a, b) -> (..., b, a)
         axes = list(range(len(input_data.shape)))

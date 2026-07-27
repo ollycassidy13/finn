@@ -474,15 +474,15 @@ class InferInnerOuterShuffles(Transformation):
                         [new_out_tensor],
                         domain="finn.custom_op.fpgadataflow",
                         backend="fpgadataflow",
-                        in_shape=in_shape,
+                        in_shape=in_reshaped,
                         data_type=data_type,
                         perm=perm,
                         name=f"InnerShuffle_{node.name}",
                         original_node_name=original_name,  # Preserve original shuffle name
                         original_simd=original_simd,  # Preserve original SIMD
                         SIMD=simd,
-                        I=in_shape[-2],  # Second to last dim
-                        J=in_shape[-1],  # Last dim
+                        I=in_reshaped[-2],  # Second to last dim
+                        J=in_reshaped[-1],  # Last dim
                     )
                 else:
                     # Get original node name if it exists, otherwise use current node name
