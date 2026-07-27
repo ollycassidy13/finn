@@ -124,6 +124,12 @@ and create a new profile instead of silently applying this one to another
 graph. The build applies matching settings before shuffle decomposition, then
 requires every profile entry to match the decomposed graph before continuing.
 
+The reviewed VCK190 schedule uses one local matrix buffer for untiled
+external-weight MVAUs and `TH=4` tiled AXI-MM streaming for the six loop-body
+weight matrices. This keeps the full image tower within device memory at the
+cost of serializing some weight loads and rereading tiled weights. Reported RTL
+throughput therefore belongs to this exact folding and ideal-memory contract.
+
 The default cross-stage verification tolerance is `0.27`. On the deterministic
 seed-0 vector, the measured maximum raw-QONNX difference is `0.186622` after
 preparation and `0.182954` after SigLIP optimization. The folded HLS C++ model

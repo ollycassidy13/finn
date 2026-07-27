@@ -73,6 +73,16 @@ def test_default_profile_records_verified_w6a7_contract():
     assert "DuplicateStreams" in specialization["Defaults"]["preferred_impl_style"][1]
     assert any("DuplicateStreams_rtl" in key for key in folding)
     assert not any("DuplicateStreams_hls" in key for key in folding)
+    for name in ("MVAU_hls_0", "MVAU_hls_1", "MVAU_hls_2"):
+        assert folding[name]["PE"] == 1
+        assert folding[name]["weight_buffer_count"] == 1
+    for index in (0, 1, 2, 5, 6, 7):
+        settings = folding[f"FINNLoop_0_body_FINNLoop_0_MVAU_rtl_{index}"]
+        assert settings["PE"] == 16
+        assert settings["SIMD"] == 12
+        assert settings["TH"] == 4
+        assert settings["mem_mode"] == "external_mem"
+        assert settings["pumpedCompute"] == 0
 
 
 def test_profile_rejects_unvalidated_board(tmp_path):
