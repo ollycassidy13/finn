@@ -8,7 +8,7 @@ import numpy as np
 
 import finn.builder.build_dataflow_steps as steps
 import finn.core.throughput_test as throughput
-import finn.util.mlo_sim as mlo_sim
+import finn.util.rtlsim as rtlsim
 from finn.builder.build_dataflow_config import DataflowBuildConfig, DataflowOutputType
 
 
@@ -65,6 +65,7 @@ def test_mlo_performance_step_uses_two_frames_and_ideal_memory(tmp_path, monkeyp
     monkeypatch.setattr(steps, "is_mlo", lambda _model: True)
     monkeypatch.setattr(steps, "deepcopy", lambda original: original)
     monkeypatch.setattr(steps, "prepare_for_stitched_ip_rtlsim", lambda original, _cfg: original)
+
     def fake_prehook_factory(_node, **kwargs):
         call["prehook_kwargs"] = kwargs
         return prehook
@@ -169,7 +170,7 @@ def test_mlo_prehook_can_zero_external_weights(tmp_path, monkeypatch):
         "iteration": 2,
     }
     loop = SimpleNamespace(get_nodeattr=lambda name: attrs[name])
-    monkeypatch.setattr(mlo_sim, "getCustomOp", lambda _node: loop)
+    monkeypatch.setattr(rtlsim, "getCustomOp", lambda _node: loop)
     (tmp_path / "memblock_MVAU_rtl_id_0.dat").write_text("010203\n040506\n")
 
     captured = {}
@@ -181,7 +182,7 @@ def test_mlo_prehook_can_zero_external_weights(tmp_path, monkeypatch):
         def aximm_ro_image(self, name, address, image):
             captured.update(name=name, address=address, image=image)
 
-    prehook = mlo_sim.mlo_prehook_func_factory(
+    prehook = rtlsim.mlo_prehook_func_factory(
         object(), external_weight_data_pattern="all_zero"
     )
     prehook(FakeSim())
