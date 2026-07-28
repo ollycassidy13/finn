@@ -81,7 +81,10 @@ class AbsorbSignBiasIntoMultiThreshold(Transformation):
                         continue
                     for candidate in DataType.get_accumulator_dt_cands():
                         odt = DataType[candidate]
-                        if odt.allowed(new_min) and odt.allowed(new_max):
+                        if all(
+                            odt.allowed(value)
+                            for value in range(int(new_min), int(new_max) + 1)
+                        ):
                             break
                     else:
                         raise AssertionError(
