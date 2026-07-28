@@ -61,9 +61,24 @@ def test_default_profile_records_verified_w6a7_contract():
     assert profile.model["output_name"] == "image_embeds"
     assert profile.reference_metrics["accuracy"]["images"] == 50_000
     assert profile.reference_metrics["finn_latency_model"] is None
-    assert profile.reference_metrics["ooc_implementation"] is None
+    ooc = profile.reference_metrics["ooc_implementation"]
+    assert ooc["part"] == "xcvc1902-vsva2197-2MP-e-S"
+    assert ooc["vivado_version"] == "2024.2"
+    assert ooc["clock_period_ns"] == 3.999
+    assert ooc["wns_ns"] == 0.037
+    assert ooc["fmax_mhz"] == 252.39777889954567
+    assert ooc["resources"] == {
+        "LUT": 163595,
+        "FF": 285187,
+        "DSP": 911,
+        "BRAM_36K": 796,
+        "BRAM_18K": 89,
+        "URAM": 459,
+        "SRL": 31019,
+    }
     assert profile.reference_metrics["board_runtime_throughput_fps"] is None
     assert profile.build["verification_atol"] == 0.27
+    assert profile.build["fifo_depth_cap"] == 32
     assert profile.resolve_file(profile.build["folding_config"]).is_file()
 
     specialization_path = profile.resolve_file(profile.build["specialization_config"])
@@ -73,6 +88,11 @@ def test_default_profile_records_verified_w6a7_contract():
     assert "DuplicateStreams" in specialization["Defaults"]["preferred_impl_style"][1]
     assert any("DuplicateStreams_rtl" in key for key in folding)
     assert not any("DuplicateStreams_hls" in key for key in folding)
+    assert folding["ElementwiseAdd_rtl_1"]["ram_style"] == "block"
+    assert folding["MVAU_rtl_0"]["PE"] == 28
+    assert folding["MVAU_rtl_0"]["SIMD"] == 8
+    assert folding["MVAU_rtl_1"]["PE"] == 32
+    assert folding["MVAU_rtl_1"]["SIMD"] == 7
     for name in ("MVAU_hls_0", "MVAU_hls_1", "MVAU_hls_2"):
         assert folding[name]["PE"] == 1
         assert folding[name]["weight_buffer_count"] == 1

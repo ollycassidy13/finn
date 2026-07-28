@@ -182,6 +182,7 @@ def build_siglip(
         folding_two_pass_relaxation=False,
         auto_fifo_depths=True,
         split_large_fifos=True,
+        fifo_depth_cap=int(build_config["fifo_depth_cap"]),
         save_intermediate_models=True,
         mlo=True,
         # Non-None placeholders satisfy pre-build checks. The injected step

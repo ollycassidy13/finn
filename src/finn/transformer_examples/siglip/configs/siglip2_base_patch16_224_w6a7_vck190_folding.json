@@ -55,7 +55,7 @@
   },
   "ElementwiseAdd_rtl_1": {
     "PE": 1,
-    "ram_style": "auto",
+    "ram_style": "block",
     "mem_mode": "internal_decoupled",
     "runtime_writeable_weights": 0
   },
@@ -480,8 +480,8 @@
     "depth_trigger_bram": 0
   },
   "MVAU_rtl_0": {
-    "PE": 1,
-    "SIMD": 1,
+    "PE": 28,
+    "SIMD": 8,
     "ram_style": "auto",
     "resType": "auto",
     "mem_mode": "dynamic",
@@ -504,8 +504,8 @@
     "depth_trigger_bram": 0
   },
   "MVAU_rtl_1": {
-    "PE": 1,
-    "SIMD": 1,
+    "PE": 32,
+    "SIMD": 7,
     "ram_style": "auto",
     "resType": "auto",
     "mem_mode": "dynamic",

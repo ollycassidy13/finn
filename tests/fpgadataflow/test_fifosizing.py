@@ -51,6 +51,7 @@ from finn.transformation.fpgadataflow.derive_characteristic import (
 )
 from finn.transformation.fpgadataflow.insert_fifo import InsertFIFO
 from finn.transformation.fpgadataflow.set_fifo_depths import (
+    CapFIFODepths,
     InsertAndSetFIFODepths,
     SplitLargeFIFOs,
 )
@@ -206,6 +207,26 @@ def test_oversized_vivado_axis_fifo_stays_rtl():
         16,
     ]
     assert all(getCustomOp(fifo).get_nodeattr("impl_style") == "rtl" for fifo in fifos)
+
+
+def test_cap_fifo_depths_updates_fifo_and_neighbors():
+    model = make_multi_io_modelwrapper(300, 300, DataType["INT8"])
+    producer = getCustomOp(model.graph.node[0])
+    consumer = getCustomOp(model.graph.node[1])
+    producer.set_nodeattr("outFIFODepths", [784])
+    consumer.set_nodeattr("inFIFODepths", [784])
+
+    model = model.transform(InsertFIFO(max_qsrl_depth=256))
+    model = model.transform(SpecializeLayers("xc7z020clg400-1"))
+    model = model.transform(CapFIFODepths(32))
+
+    fifo = model.get_nodes_by_op_type("StreamingFIFO_rtl")[0]
+    assert getCustomOp(fifo).get_nodeattr("depth") == 32
+    assert getCustomOp(fifo).get_nodeattr("impl_style") == "rtl"
+    producer = model.find_producer(fifo.input[0])
+    consumer = model.find_consumer(fifo.output[0])
+    assert getCustomOp(producer).get_nodeattr("outFIFODepths") == [32]
+    assert getCustomOp(consumer).get_nodeattr("inFIFODepths") == [32]
 
 
 def test_characterization_fifosizing_uses_matching_consumer_input(tmp_path):

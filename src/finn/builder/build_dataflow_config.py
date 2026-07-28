@@ -268,6 +268,11 @@ class DataflowBuildConfig:
     #: Allow to configure very large FIFOs in the folding_config_file.
     split_large_fifos: Optional[bool] = False
 
+    #: Optional upper bound applied to FIFO depths after sizing and before
+    #: large-FIFO splitting. This trades buffering and potentially throughput
+    #: for memory use; the resulting design must be checked for liveness.
+    fifo_depth_cap: Optional[int] = None
+
     #: When `auto_fifo_depths = True`, select which method will be used for
     #: setting the FIFO sizes.
     auto_fifo_strategy: Optional[AutoFIFOSizingMethod] = AutoFIFOSizingMethod.LARGEFIFO_RTLSIM

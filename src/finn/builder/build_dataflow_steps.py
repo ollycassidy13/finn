@@ -132,6 +132,7 @@ from finn.transformation.fpgadataflow.replace_verilog_relpaths import (
 )
 from finn.transformation.fpgadataflow.set_exec_mode import SetExecMode
 from finn.transformation.fpgadataflow.set_fifo_depths import (
+    CapFIFODepths,
     InsertAndSetFIFODepths,
     RemoveShallowFIFOs,
     SplitLargeFIFOs,
@@ -1106,6 +1107,9 @@ def step_set_fifo_depths(model: ModelWrapper, cfg: DataflowBuildConfig):
         if cfg.folding_config_file is not None:
             model = model.transform(ApplyConfig(cfg.folding_config_file))
 
+    if cfg.fifo_depth_cap is not None:
+        model = model.transform(CapFIFODepths(cfg.fifo_depth_cap))
+
     # extract the final configuration and save it as json
     hw_attrs = [
         "PE",
@@ -1649,6 +1653,8 @@ def step_loop_body_set_fifo_depths(model: ModelWrapper, cfg: DataflowBuildConfig
     )
     # snapshot per-FIFO debug logs for this loop body before the live dir is reused
     snapshot_fifo_logs(cfg, "fifo_sizing", loop_context=loop_context)
+    if cfg.fifo_depth_cap is not None:
+        model = model.transform(CapFIFODepths(cfg.fifo_depth_cap))
     model = model.transform(SplitLargeFIFOs())
     model = model.transform(RemoveShallowFIFOs())
     # Re-apply the enclosing FINNLoop name as a prefix so loop-body node (and

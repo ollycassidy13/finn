@@ -129,6 +129,14 @@ external-weight MVAUs and `TH=4` tiled AXI-MM streaming for the six loop-body
 weight matrices. This keeps the full image tower within device memory at the
 cost of serializing some weight loads and rereading tiled weights. Reported RTL
 throughput therefore belongs to this exact folding and ideal-memory contract.
+FIFO depths are capped at 32 after automatic sizing to keep the stitched design
+within VCK190 memory capacity; this can reduce throughput, so the reported
+throughput is measured from this capped schedule. The large top-level residual
+parameter buffer uses block RAM rather than Vivado's automatic URAM mapping.
+The two top-level attention matrix multiplications use the same legal
+`PE`/`SIMD` foldings as their loop-body counterparts. The attention dynamic
+weight loaders use flat RAM words so Vivado infers distributed memory instead
+of expanding the buffers into a congested register implementation.
 
 The default cross-stage verification tolerance is `0.27`. On the deterministic
 seed-0 vector, the measured maximum raw-QONNX difference is `0.186622` after
@@ -147,7 +155,8 @@ model.
 | ImageNet-1K top-1 | 72.472% | 50,000 images, static zero-shot comparison head |
 | ImageNet-1K top-5 | 92.228% | same evaluation |
 | FINN modeled latency | not measured | no current-profile scheduler result is claimed |
-| VCK190 OOC timing | not measured | run the OOC flow above to produce current reports |
+| VCK190 OOC timing | 252.398 MHz Fmax; +0.037 ns WNS | routed at a 3.999 ns requested period with Vivado 2024.2 |
+| VCK190 OOC resources | 163,595 LUT; 285,187 FF; 911 DSP; 796 RAMB36 + 89 RAMB18; 459 URAM | routed utilization report |
 | Board-runtime throughput | not measured | no board run is claimed |
 | Ideal-memory RTL throughput | not measured | enable `--measure-rtlsim-performance` to produce it |
 

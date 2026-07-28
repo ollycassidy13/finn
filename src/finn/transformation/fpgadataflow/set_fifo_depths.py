@@ -197,6 +197,53 @@ class CapConvolutionFIFODepths(Transformation):
         return (model, False)
 
 
+class CapFIFODepths(Transformation):
+    """Apply an upper bound to inserted FIFO depths.
+
+    The cap is applied after FIFO sizing. FIFOs at or below the RTL FIFO limit
+    are switched from the Vivado FIFO implementation to the smaller RTL
+    implementation. Neighboring ``inFIFODepths`` and ``outFIFODepths``
+    attributes are kept consistent so an extracted hardware configuration
+    records the implemented depths.
+    """
+
+    def __init__(self, max_depth, max_qsrl_depth=256):
+        super().__init__()
+        if not isinstance(max_depth, int) or isinstance(max_depth, bool) or max_depth < 2:
+            raise ValueError("max_depth must be an integer >= 2")
+        self.max_depth = max_depth
+        self.max_qsrl_depth = max_qsrl_depth
+
+    @staticmethod
+    def _set_neighbor_depth(node, attr_name, tensor_name, depth):
+        node_inst = getCustomOp(node)
+        depths = node_inst.get_nodeattr(attr_name)
+        tensors = node.input if attr_name == "inFIFODepths" else node.output
+        tensor_index = list(tensors).index(tensor_name)
+        if tensor_index < len(depths):
+            depths[tensor_index] = int(depth)
+            node_inst.set_nodeattr(attr_name, depths)
+
+    def apply(self, model):
+        for node in model.graph.node:
+            if not node.op_type.startswith("StreamingFIFO"):
+                continue
+            fifo_inst = getCustomOp(node)
+            depth = min(fifo_inst.get_nodeattr("depth"), self.max_depth)
+            fifo_inst.set_nodeattr("depth", depth)
+            if depth <= self.max_qsrl_depth:
+                fifo_inst.set_nodeattr("impl_style", "rtl")
+
+            producer = model.find_producer(node.input[0])
+            if producer is not None and not producer.op_type.startswith("StreamingFIFO"):
+                self._set_neighbor_depth(producer, "outFIFODepths", node.input[0], depth)
+            consumer = model.find_consumer(node.output[0])
+            if consumer is not None and not consumer.op_type.startswith("StreamingFIFO"):
+                self._set_neighbor_depth(consumer, "inFIFODepths", node.output[0], depth)
+
+        return (model, False)
+
+
 def xsi_fifosim(model, n_inferences, max_iters=None, throttle_cycles=0, behav=True):
     """Create a XSI model of stitched IP and use a simple C++
     driver to drive the input stream. Useful for FIFO sizing, latency

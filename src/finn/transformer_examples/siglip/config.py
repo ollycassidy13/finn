@@ -73,6 +73,7 @@ def load_profile(path: str | Path = DEFAULT_PROFILE) -> SiglipProfile:
         raise ValueError("clock_ns must be positive")
     if not isinstance(build.get("target_fps"), (int, float)) or build["target_fps"] <= 0:
         raise ValueError("target_fps must be positive")
+    _require_int(build, "fifo_depth_cap", minimum=2)
 
     return SiglipProfile(
         path=profile_path,
