@@ -40,7 +40,7 @@ from finn.util.basic import (
     make_build_dir,
 )
 from finn.util.data_packing import npy_to_rtlsim_input, rtlsim_output_to_npy
-from finn.util.mlo_sim import dat_file_to_numpy_array
+from finn.util.rtlsim import dat_file_to_numpy_array
 
 finnxsi = xsi if xsi.is_available() else None
 
@@ -133,17 +133,22 @@ def rtlsim_exec_cppxsi(
     behav=True,
 ):
     """Use XSI C++ rtl simulation to execute given model with stitched IP.
+
     The dummy_data_mode flag controls whether the simulation is driven by
     dummy data or real data. The execution_context parameter must be formatted
     according to whether dummy or real data is used.
     If behav=True (default), FINN_SIMULATION is defined and fifo_gauge is used.
     If behav=False, Q_srl is used instead (no debug logging).
-    Example with dummy_data = True:
+
+    Example with dummy_data = True::
+
         execution_context = {
             "inputs" : {"<name_of_input_stream>" : <number_of_transactions>},
             "outputs" : {"<name_of_output_stream>" : <number_of_transactions>},
         }
-    Example with dummy_data = False:
+
+    Example with dummy_data = False::
+
         execution_context = {
             "<tensor_name>" : <np.ndarray>
         }
@@ -413,7 +418,7 @@ def rtlsim_exec_finnxsi(
             # memblock.dat stores weights byte-aligned per SIMD group
             # (roundup(SIMD*bitwidth, 8) bits per group), the layout fetch_weights
             # expects in external memory (DDR, HBM, ...). Parse it (LSB-first) into a
-            # flat byte image, matching the validated MLO path in mlo_sim.py.
+            # flat byte image, matching the validated MLO path in rtlsim.py.
             weight_data = dat_file_to_numpy_array(dat_path)
             sim.aximm_ro_image(aximm_name, 0, weight_data.flatten())
     if pre_hook is not None:
