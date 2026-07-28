@@ -41,7 +41,7 @@ precision, depth, image size, and quantizer provenance before FINN starts.
 Validate that handoff without starting a build:
 
 ```bash
-./run-docker.sh python -m finn.transformer_examples.siglip.build \
+./run-docker.sh python -m transformer_examples.siglip.build \
   --model build/siglip/qat_static_imagenet_qonnx.onnx \
   --quantization-report build/siglip/qat_report.json \
   --output-dir build/siglip/validation \
@@ -57,7 +57,7 @@ a path visible inside the FINN container, such as the checkout or
 Generate deterministic reference vectors:
 
 ```bash
-./run-docker.sh python -m finn.transformer_examples.siglip.make_test_vectors \
+./run-docker.sh python -m transformer_examples.siglip.make_test_vectors \
   --model build/siglip/qat_static_imagenet_qonnx.onnx \
   --output-dir build/siglip/vectors
 ```
@@ -65,7 +65,7 @@ Generate deterministic reference vectors:
 Run the phase-based estimate flow with Python checks:
 
 ```bash
-./run-docker.sh python -m finn.transformer_examples.siglip.build \
+./run-docker.sh python -m transformer_examples.siglip.build \
   --model build/siglip/qat_static_imagenet_qonnx.onnx \
   --quantization-report build/siglip/qat_report.json \
   --output-dir build/siglip/estimate \
@@ -78,7 +78,7 @@ Run the phase-based estimate flow with Python checks:
 Generate stitched IP and run functional RTL simulation:
 
 ```bash
-./run-docker.sh python -m finn.transformer_examples.siglip.build \
+./run-docker.sh python -m transformer_examples.siglip.build \
   --model build/siglip/qat_static_imagenet_qonnx.onnx \
   --quantization-report build/siglip/qat_report.json \
   --output-dir build/siglip/stitched_ip \
@@ -92,7 +92,7 @@ Generate a routed out-of-context VCK190 checkpoint and record ideal-memory RTL
 performance:
 
 ```bash
-./run-docker.sh python -m finn.transformer_examples.siglip.build \
+./run-docker.sh python -m transformer_examples.siglip.build \
   --model build/siglip/qat_static_imagenet_qonnx.onnx \
   --quantization-report build/siglip/qat_report.json \
   --output-dir build/siglip/ooc \

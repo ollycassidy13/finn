@@ -20,12 +20,12 @@ from finn.builder.build_dataflow_config import (
     default_build_dataflow_steps,
     estimate_only_dataflow_steps,
 )
-from finn.transformer_examples.siglip.config import DEFAULT_PROFILE, SiglipProfile, load_profile
-from finn.transformer_examples.siglip.mlo import (
+from transformer_examples.siglip.config import DEFAULT_PROFILE, SiglipProfile, load_profile
+from transformer_examples.siglip.mlo import (
     make_mlo_boundary_step,
     step_round_siglip_thresholds_before_mlo,
 )
-from finn.transformer_examples.siglip.phases import (
+from transformer_examples.siglip.phases import (
     make_siglip_folding_step,
     phase_optimize_siglip,
     phase_prepare_siglip,

@@ -2,31 +2,35 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import json
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import onnx
 import pytest
 from onnx import TensorProto, helper, numpy_helper
+from qonnx.core.datatype import DataType
+from qonnx.core.modelwrapper import ModelWrapper
+from qonnx.transformation.general import GiveReadableTensorNames, GiveUniqueNodeNames
+from qonnx.transformation.infer_shapes import InferShapes
 
-from finn.transformer_examples.siglip.build import _verification_steps
-from finn.transformer_examples.siglip.config import DEFAULT_PROFILE, load_profile
-from finn.transformer_examples.siglip.mlo import (
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from transformer_examples.siglip.build import _verification_steps  # noqa: E402
+from transformer_examples.siglip.config import DEFAULT_PROFILE, load_profile  # noqa: E402
+from transformer_examples.siglip.mlo import (  # noqa: E402
     find_vision_loop_body_ranges,
     make_mlo_boundary_step,
     step_round_siglip_thresholds_before_mlo,
 )
-from finn.transformer_examples.siglip.phases import (
+from transformer_examples.siglip.phases import (  # noqa: E402
     _DuplicateSafeModelWrapper,
     _absorb_pre_matmul_dequant,
     _integerize_static_lhs_matmul,
     _select_graph_output,
     make_siglip_folding_step,
 )
-from qonnx.core.datatype import DataType
-from qonnx.core.modelwrapper import ModelWrapper
-from qonnx.transformation.general import GiveReadableTensorNames, GiveUniqueNodeNames
-from qonnx.transformation.infer_shapes import InferShapes
 
 
 def _node(op_type, index):
