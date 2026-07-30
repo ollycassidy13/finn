@@ -1,9 +1,5 @@
-############################################################################
-# Copyright (C) 2026, Advanced Micro Devices, Inc.
-# All rights reserved.
-#
+# Copyright Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: BSD-3-Clause
-############################################################################
 
 import numpy as np
 import warnings
@@ -14,9 +10,6 @@ from finn.custom_op.fpgadataflow.hwcustomop import HWCustomOp
 
 class SelectToken(HWCustomOp):
     """Select one token vector from a sequence of token vectors."""
-
-    def __init__(self, onnx_node, **kwargs):
-        super().__init__(onnx_node, **kwargs)
 
     def get_nodeattr_types(self):
         my_attrs = super().get_nodeattr_types()
@@ -86,9 +79,6 @@ class SelectToken(HWCustomOp):
     def get_outstream_width(self, ind=0):
         return self.get_output_datatype().bitwidth() * self.get_nodeattr("SIMD")
 
-    def get_number_output_values(self):
-        return int(np.prod(self.get_folded_output_shape()[:-1]))
-
     def get_exp_cycles(self):
         return int(np.prod(self.get_folded_input_shape()[:-1]))
 
@@ -103,9 +93,6 @@ class SelectToken(HWCustomOp):
         context[node.output[0]] = np.asarray(result, dtype=np.float32).reshape(
             self.get_normal_output_shape()
         )
-
-    def bram_estimation(self):
-        return 0
 
     def lut_estimation(self):
         return 200
