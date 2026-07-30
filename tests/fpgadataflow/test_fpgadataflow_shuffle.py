@@ -15,8 +15,8 @@ import os
 import tempfile
 import torch
 import torch.onnx
-from onnx import TensorProto, helper
 from brevitas.export import export_qonnx
+from onnx import TensorProto, helper
 from qonnx.core.datatype import DataType
 from qonnx.core.modelwrapper import ModelWrapper
 from qonnx.custom_op.registry import getCustomOp

@@ -110,9 +110,7 @@ class MVAU_rtl(MVAU, RTLBackend):
                         if mem_mode == "dynamic":
                             reshaped_input = self.get_dynamic_weight_matrices(context[inputs])
                         else:
-                            reshaped_input = context[inputs].reshape(
-                                -1, context[inputs].shape[-1]
-                            )
+                            reshaped_input = context[inputs].reshape(-1, context[inputs].shape[-1])
                         self.make_weight_file(
                             reshaped_input, "decoupled_npy", "{}/input_1.npy".format(code_gen_dir)
                         )

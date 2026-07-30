@@ -225,9 +225,7 @@ def test_unsigned_quant_conversion_supports_nonzero_zero_point():
 @pytest.mark.transform
 def test_unsigned_quant_conversion_supports_per_channel_zero_point():
     x = np.array([[-0.25, 0.5]], dtype=np.float32)
-    model = _make_single_quant_model(
-        x, [0.125, 0.25], [1.5, 2.25], [7.0], 0, 0, "ROUND"
-    )
+    model = _make_single_quant_model(x, [0.125, 0.25], [1.5, 2.25], [7.0], 0, 0, "ROUND")
     converted = model.transform(ConvertQONNXtoFINN())
     streamlined = converted.transform(Streamline())
 

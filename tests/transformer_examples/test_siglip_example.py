@@ -1,32 +1,35 @@
 # Copyright Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: BSD-3-Clause
 
-import json
-import sys
-from pathlib import Path
-from types import SimpleNamespace
+import pytest
 
+import json
 import numpy as np
 import onnx
-import pytest
+import sys
 from onnx import TensorProto, helper, numpy_helper
+from pathlib import Path
 from qonnx.core.datatype import DataType
 from qonnx.core.modelwrapper import ModelWrapper
 from qonnx.transformation.general import GiveReadableTensorNames, GiveUniqueNodeNames
 from qonnx.transformation.infer_shapes import InferShapes
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from transformer_examples.siglip.build import _verification_steps  # noqa: E402
-from transformer_examples.siglip.config import DEFAULT_PROFILE, load_profile  # noqa: E402
+from transformer_examples.siglip.config import (  # noqa: E402
+    DEFAULT_PROFILE,
+    load_profile,
+)
 from transformer_examples.siglip.mlo import (  # noqa: E402
     find_vision_loop_body_ranges,
     make_mlo_boundary_step,
     step_round_siglip_thresholds_before_mlo,
 )
 from transformer_examples.siglip.phases import (  # noqa: E402
-    _DuplicateSafeModelWrapper,
     _absorb_pre_matmul_dequant,
+    _DuplicateSafeModelWrapper,
     _integerize_static_lhs_matmul,
     _select_graph_output,
     make_siglip_folding_step,
@@ -81,6 +84,8 @@ def test_default_profile_records_verified_w6a7_contract():
         "SRL": 31019,
     }
     assert profile.reference_metrics["board_runtime_throughput_fps"] is None
+    assert profile.reference_metrics["ideal_memory_rtlsim_throughput_fps"] is None
+    assert profile.reference_metrics.get("stitched_rtlsim_max_absolute_error") is None
     assert profile.build["verification_atol"] == 0.27
     assert profile.build["fifo_depth_cap"] == 32
     assert profile.resolve_file(profile.build["folding_config"]).is_file()

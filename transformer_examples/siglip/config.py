@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-
 EXAMPLE_DIR = Path(__file__).resolve().parent
 DEFAULT_PROFILE = EXAMPLE_DIR / "configs" / "siglip2_base_patch16_224_w6a7_qv_lsq.json"
 

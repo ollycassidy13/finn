@@ -690,9 +690,7 @@ class FINNLoop(HWCustomOp, RTLBackend):
         cmd.append("create_bd_pin -dir I -type clk /%s/%s" % (self.onnx_node.name, clk_name))
         cmd.append("create_bd_pin -dir I -type rst /%s/%s" % (self.onnx_node.name, rst_name))
         if clk2x_name is not None:
-            cmd.append(
-                "create_bd_pin -dir I -type clk /%s/%s" % (self.onnx_node.name, clk2x_name)
-            )
+            cmd.append("create_bd_pin -dir I -type clk /%s/%s" % (self.onnx_node.name, clk2x_name))
         # interfaces
         m_axis_intfs = node_intf["m_axis"]
         s_axis_intfs = node_intf["s_axis"]
@@ -1151,9 +1149,7 @@ class FINNLoop(HWCustomOp, RTLBackend):
         cmd.append("set_property name ap_clk [get_bd_ports ap_clk_0]")
         cmd.append("set_property name ap_rst_n [get_bd_ports ap_rst_n_0]")
         if clk2x_name is not None:
-            cmd.append(
-                "set_property name %s [get_bd_ports %s_0]" % (clk2x_name, clk2x_name)
-            )
+            cmd.append("set_property name %s [get_bd_ports %s_0]" % (clk2x_name, clk2x_name))
         cmd.append("set_property name out0_V [get_bd_intf_ports out0_V_0]")
         cmd.append(
             "set_property name m_axi_intermediate_frame "

@@ -960,9 +960,7 @@ def step_hw_ipgen(model: ModelWrapper, cfg: DataflowBuildConfig):
                 for node in verify_model.graph.node:
                     node_inst = getCustomOp(node)
                     node_inst.set_nodeattr("rtlsim_trace", f"{abspath}/{node.name}_rtlsim.wdb")
-            verify_model = verify_model.transform(
-                PrepareRTLSim(behav=cfg.verify_rtlsim_behavioral)
-            )
+            verify_model = verify_model.transform(PrepareRTLSim(behav=cfg.verify_rtlsim_behavioral))
             verify_model = verify_model.transform(SetExecMode("rtlsim"))
             verify_step(verify_model, cfg, "node_by_node_rtlsim", need_parent=True)
             # Clear rtlsim_trace attributes to prevent later simulations from
@@ -1264,9 +1262,7 @@ def step_create_stitched_ip(model: ModelWrapper, cfg: DataflowBuildConfig):
                 if is_mlo(model):
                     verify_mlo(verify_model, cfg, "stitched_ip_rtlsim")
                     for loop_node in verify_model.get_nodes_by_op_type("FINNLoop"):
-                        snapshot_fifo_logs(
-                            cfg, "stitched_ip_rtlsim", loop_context=loop_node.name
-                        )
+                        snapshot_fifo_logs(cfg, "stitched_ip_rtlsim", loop_context=loop_node.name)
                     snapshot_fifo_logs(cfg, "stitched_ip_rtlsim")
                 else:
                     verify_step(verify_model, cfg, "stitched_ip_rtlsim", need_parent=True)

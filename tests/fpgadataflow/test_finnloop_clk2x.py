@@ -1,10 +1,10 @@
 # Copyright Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import pytest
+
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
-
-import pytest
 
 from finn.custom_op.fpgadataflow.rtl.finn_loop import FINNLoop
 from finn.transformation.fpgadataflow.create_stitched_ip import CreateStitchedIP

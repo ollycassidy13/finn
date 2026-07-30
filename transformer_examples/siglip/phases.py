@@ -5,18 +5,11 @@
 
 from __future__ import annotations
 
+import numpy as np
 import warnings
 from copy import deepcopy
 from json import load
-
-import numpy as np
 from onnx import AttributeProto
-from finn.builder.build_dataflow_config import VerificationStepType
-from finn.builder.build_dataflow_phases import phase_optimize_model
-from finn.builder.build_dataflow_steps import step_tidy_up, verify_step
-from finn.transformation.general import ApplyConfig
-from finn.transformation.qonnx.convert_qonnx_to_finn import ConvertQONNXtoFINN
-from finn.transformation.streamline.extract_norm_scale_bias import ExtractNormScaleBias
 from qonnx.core.datatype import DataType
 from qonnx.core.modelwrapper import ModelWrapper
 from qonnx.transformation.general import (
@@ -28,6 +21,13 @@ from qonnx.transformation.infer_datatypes import InferDataTypes
 from qonnx.transformation.infer_shapes import InferShapes
 from qonnx.transformation.remove import RemoveIdentityOps, RemoveUnusedNodes
 from qonnx.util.cleanup import cleanup_model
+
+from finn.builder.build_dataflow_config import VerificationStepType
+from finn.builder.build_dataflow_phases import phase_optimize_model
+from finn.builder.build_dataflow_steps import step_tidy_up, verify_step
+from finn.transformation.general import ApplyConfig
+from finn.transformation.qonnx.convert_qonnx_to_finn import ConvertQONNXtoFINN
+from finn.transformation.streamline.extract_norm_scale_bias import ExtractNormScaleBias
 
 
 class _DuplicateSafeModelWrapper(ModelWrapper):

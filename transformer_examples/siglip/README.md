@@ -138,11 +138,11 @@ The two top-level attention matrix multiplications use the same legal
 weight loaders use flat RAM words so Vivado infers distributed memory instead
 of expanding the buffers into a congested register implementation.
 
-The default cross-stage verification tolerance is `0.27`. On the deterministic
-seed-0 vector, the measured maximum raw-QONNX difference is `0.186622` after
-preparation and `0.182954` after SigLIP optimization. The folded HLS C++ model
-has a measured maximum difference of `0.259406`. This tolerance is only a
-conversion smoke-check bound; it is not an accuracy measurement.
+The default cross-stage verification tolerance is `0.27`. Phase-specific
+maximum differences are intentionally not published in this initial example;
+use the generated verification artifacts as the authoritative result for a
+particular model and build. The tolerance is only a conversion smoke-check
+bound; it is not an accuracy measurement.
 
 ## Reference results
 

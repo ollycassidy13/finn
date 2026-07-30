@@ -7,12 +7,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import onnx
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
 import finn.builder.build_dataflow as build
-import onnx
 from finn.builder.build_dataflow_config import (
     DataflowBuildConfig,
     DataflowOutputType,
@@ -20,7 +20,11 @@ from finn.builder.build_dataflow_config import (
     default_build_dataflow_steps,
     estimate_only_dataflow_steps,
 )
-from transformer_examples.siglip.config import DEFAULT_PROFILE, SiglipProfile, load_profile
+from transformer_examples.siglip.config import (
+    DEFAULT_PROFILE,
+    SiglipProfile,
+    load_profile,
+)
 from transformer_examples.siglip.mlo import (
     make_mlo_boundary_step,
     step_round_siglip_thresholds_before_mlo,

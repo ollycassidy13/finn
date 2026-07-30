@@ -554,8 +554,7 @@ class InsertAndSetFIFODepths(Transformation):
                 toplevel_style_exception = toplevel_in or toplevel_out
                 # Set FIFO implementation/ram styles
                 vivado_width_supported = (
-                    node_inst.get_outstream_width_padded()
-                    <= VIVADO_AXIS_DATA_FIFO_MAX_WIDTH
+                    node_inst.get_outstream_width_padded() <= VIVADO_AXIS_DATA_FIFO_MAX_WIDTH
                 )
                 if (
                     depth > self.max_qsrl_depth
@@ -809,8 +808,7 @@ class SplitLargeFIFOs(Transformation):
             if node.op_type == ("StreamingFIFO_rtl"):
                 n_inst = getCustomOp(node)
                 width_exceeds_vivado_limit = (
-                    n_inst.get_outstream_width_padded()
-                    > VIVADO_AXIS_DATA_FIFO_MAX_WIDTH
+                    n_inst.get_outstream_width_padded() > VIVADO_AXIS_DATA_FIFO_MAX_WIDTH
                 )
                 depth = n_inst.get_nodeattr("depth")
                 if width_exceeds_vivado_limit:
@@ -822,9 +820,7 @@ class SplitLargeFIFOs(Transformation):
                         cfgs.append((max(2, chunk_depth), "rtl"))
                         remaining_depth -= chunk_depth
                 else:
-                    cfgs = get_fifo_split_configs(
-                        depth, self.max_qsrl_depth, self.max_vivado_depth
-                    )
+                    cfgs = get_fifo_split_configs(depth, self.max_qsrl_depth, self.max_vivado_depth)
                 if len(cfgs) > 1:
                     fld_shape = n_inst.get_folded_output_shape()
                     n_shape = n_inst.get_normal_output_shape()

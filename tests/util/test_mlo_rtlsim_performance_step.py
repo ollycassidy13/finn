@@ -2,9 +2,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import json
-from types import SimpleNamespace
-
 import numpy as np
+from types import SimpleNamespace
 
 import finn.builder.build_dataflow_steps as steps
 import finn.core.throughput_test as throughput
@@ -160,9 +159,10 @@ def test_throughput_test_can_use_all_zero_inputs(monkeypatch):
 
 def test_mlo_prehook_can_zero_external_weights(tmp_path, monkeypatch):
     body_input = SimpleNamespace(name="weights")
+    downstream = SimpleNamespace(op_type="MVAU_rtl")
     body = SimpleNamespace(
         graph=SimpleNamespace(input=[body_input]),
-        find_consumer=lambda _name: SimpleNamespace(op_type="MVAU_rtl"),
+        find_consumer=lambda _name: downstream,
     )
     attrs = {
         "body": body,
@@ -170,7 +170,8 @@ def test_mlo_prehook_can_zero_external_weights(tmp_path, monkeypatch):
         "iteration": 2,
     }
     loop = SimpleNamespace(get_nodeattr=lambda name: attrs[name])
-    monkeypatch.setattr(rtlsim, "getCustomOp", lambda _node: loop)
+    mvau = SimpleNamespace(get_nodeattr=lambda name: {"address_offset": 0}[name])
+    monkeypatch.setattr(rtlsim, "getCustomOp", lambda node: mvau if node is downstream else loop)
     (tmp_path / "memblock_MVAU_rtl_id_0.dat").write_text("010203\n040506\n")
 
     captured = {}
@@ -182,13 +183,11 @@ def test_mlo_prehook_can_zero_external_weights(tmp_path, monkeypatch):
         def aximm_ro_image(self, name, address, image):
             captured.update(name=name, address=address, image=image)
 
-    prehook = rtlsim.mlo_prehook_func_factory(
-        object(), external_weight_data_pattern="all_zero"
-    )
+    prehook = rtlsim.mlo_prehook_func_factory(object(), external_weight_data_pattern="all_zero")
     prehook(FakeSim())
 
-    assert captured["queue"] == "m_axi_hbm"
+    assert captured["queue"] == "m_axi_intermediate_frame"
     assert captured["name"] == "m_axi_MVAU_id_0"
     assert captured["address"] == 0
-    assert captured["image"].shape == (64,)
+    assert captured["image"].shape == (6,)
     assert np.all(captured["image"] == 0)

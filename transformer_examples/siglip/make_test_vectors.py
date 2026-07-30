@@ -7,13 +7,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import numpy as np
 import warnings
 from pathlib import Path
-
-import numpy as np
 from qonnx.core.modelwrapper import ModelWrapper
 from qonnx.core.onnx_exec import execute_onnx
-
 
 DEFAULT_OUTPUT_NAME = "image_embeds"
 
