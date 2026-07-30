@@ -82,16 +82,16 @@ def _determine_impl_style(node, fpgapart, model):
                     return "rtl"
                 else:
                     return "hls"
-            elif optype == "HWSoftmax":
-                if _softmax_rtl_possible(node, fpgapart):
-                    return "rtl"
-                else:
-                    return "hls"
             elif optype == "PWPolyF":
                 if _pwpolyf_rtl_possible(node, fpgapart):
                     return "rtl"
                 else:
                     _raise_pwpolyf_unsupported(node, fpgapart)
+            elif optype == "HWSoftmax":
+                if _softmax_rtl_possible(node, fpgapart):
+                    return "rtl"
+                else:
+                    return "hls"
             elif optype == "Requant":
                 if _requant_rtl_possible(node, fpgapart):
                     return "rtl"
@@ -388,12 +388,6 @@ def _layernorm_rtl_possible(n, fpgapart):
         return True
 
 
-def _softmax_rtl_possible(n, fpgapart):
-    # Checks whether RTL-based SoftMax is supported.
-    # The RTL softmax core uses DSPFP32, so only Versal devices are supported.
-    return is_versal(fpgapart)
-
-
 def _pwpolyf_rtl_possible(n, fpgapart):
     # PWPolyF uses the Versal DSPFP32 primitive.
     return is_versal(fpgapart)
@@ -406,6 +400,12 @@ def _raise_pwpolyf_unsupported(n, fpgapart):
         on Versal devices."""
         % (n.name, fpgapart)
     )
+
+
+def _softmax_rtl_possible(n, fpgapart):
+    # Checks whether RTL-based SoftMax is supported.
+    # The RTL softmax core uses DSPFP32, so only Versal devices are supported.
+    return is_versal(fpgapart)
 
 
 def _requant_rtl_possible(n, fpgapart):
