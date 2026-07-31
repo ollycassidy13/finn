@@ -207,7 +207,7 @@
     "PE": 4,
     "runtime_writeable_weights": 0,
     "depth_trigger_uram": 0,
-    "depth_trigger_bram": 0
+    "depth_trigger_bram": 1000000
   },
   "FINNLoop_0_body_FINNLoop_0_MVAU_rtl_4": {
     "PE": 32,
@@ -317,13 +317,13 @@
   },
   "FINNLoop_0_body_FINNLoop_0_ElementwiseMul_rtl_7": {
     "PE": 4,
-    "ram_style": "auto",
+    "ram_style": "distributed",
     "mem_mode": "internal_decoupled",
     "runtime_writeable_weights": 0
   },
   "FINNLoop_0_body_FINNLoop_0_ElementwiseAdd_rtl_7": {
     "PE": 4,
-    "ram_style": "auto",
+    "ram_style": "distributed",
     "mem_mode": "internal_decoupled",
     "runtime_writeable_weights": 0
   },
@@ -379,7 +379,7 @@
     "PE": 4,
     "runtime_writeable_weights": 0,
     "depth_trigger_uram": 0,
-    "depth_trigger_bram": 0
+    "depth_trigger_bram": 1000000
   },
   "FINNLoop_0_body_FINNLoop_0_MVAU_rtl_7": {
     "PE": 16,
@@ -588,7 +588,7 @@
   "MVAU_rtl_3": {
     "PE": 1,
     "SIMD": 12,
-    "ram_style": "ultra",
+    "ram_style": "distributed",
     "resType": "auto",
     "mem_mode": "external_mem",
     "weight_buffer_count": 1,

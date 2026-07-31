@@ -154,6 +154,15 @@ def test_default_profile_records_verified_w6a7_contract():
         assert settings["TH"] == 4
         assert settings["mem_mode"] == "external_mem"
         assert settings["pumpedCompute"] == 0
+    assert folding["MVAU_rtl_3"]["ram_style"] == "distributed"
+    for index in (6, 7):
+        assert folding[f"FINNLoop_0_body_FINNLoop_0_MVAU_rtl_{index}"]["ram_style"] == "block"
+    for op_type in ("ElementwiseAdd", "ElementwiseMul"):
+        key = f"FINNLoop_0_body_FINNLoop_0_{op_type}_rtl_7"
+        assert folding[key]["ram_style"] == "distributed"
+    for index in (4, 7):
+        key = f"FINNLoop_0_body_FINNLoop_0_Thresholding_rtl_{index}"
+        assert folding[key]["depth_trigger_bram"] == 1_000_000
 
 
 def test_profile_rejects_unvalidated_board(tmp_path):
