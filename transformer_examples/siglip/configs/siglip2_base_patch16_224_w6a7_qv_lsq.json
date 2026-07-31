@@ -39,16 +39,16 @@
       "part": "xcvc1902-vsva2197-2MP-e-S",
       "vivado_version": "2024.2",
       "clock_period_ns": 3.999,
-      "wns_ns": 0.037,
-      "fmax_mhz": 252.39777889954567,
+      "wns_ns": -1.906,
+      "fmax_mhz": 169.3480101608806,
       "resources": {
-        "LUT": 163595,
-        "FF": 285187,
+        "LUT": 617246,
+        "FF": 291860,
         "DSP": 911,
-        "BRAM_36K": 796,
-        "BRAM_18K": 89,
-        "URAM": 459,
-        "SRL": 31019
+        "BRAM_36K": 928,
+        "BRAM_18K": 66,
+        "URAM": 458,
+        "SRL": 30492
       }
     },
     "board_runtime_throughput_fps": null,

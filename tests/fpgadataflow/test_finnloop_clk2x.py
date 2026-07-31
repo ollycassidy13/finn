@@ -22,6 +22,7 @@ def test_finnloop_propagates_optional_clk2x(body_clk2x):
         }
     )
     loop_inst = Mock()
+    loop_inst.onnx_node.attribute = []
     loop_inst.get_nodeattr.return_value = body
     loop_inst.get_instream_width_padded.return_value = 32
     loop_inst.get_outstream_width_padded.return_value = 32

@@ -753,9 +753,12 @@ close $ofile
 """
         )
 
-        # export list of used Verilog files (for rtlsim later on)
+        # Reload so Vivado discovers output products nested inside packaged FINNLoop
+        # nodes, then include those products in the RTL simulation source manifest.
+        tcl.append("close_project")
+        tcl.append("open_project %s/%s.xpr" % (vivado_stitch_proj_dir, prjname))
         tcl.append(
-            "set all_v_files [get_files -filter {USED_IN_SYNTHESIS == 1 "
+            "set all_v_files [get_files -all -filter {USED_IN_SYNTHESIS == 1 "
             + "&& (FILE_TYPE == Verilog || FILE_TYPE == SystemVerilog "
             + '|| FILE_TYPE == "Verilog Header" || FILE_TYPE == VHDL '
             + "|| FILE_TYPE == XCI)}]"
