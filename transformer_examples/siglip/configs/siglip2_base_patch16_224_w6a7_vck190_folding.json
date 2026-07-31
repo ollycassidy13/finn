@@ -13,10 +13,10 @@
     "depth_trigger_bram": 0
   },
     "OuterShuffle_hls_1": {
-        "SIMD": 8
+        "SIMD": 2
   },
   "InnerShuffle_rtl_1": {
-    "SIMD": 3
+    "SIMD": 2
   },
   "ConvolutionInputGenerator_rtl_0": {
     "SIMD": 1,
@@ -225,7 +225,31 @@
     "depth_trigger_bram": 0
   },
     "FINNLoop_0_body_FINNLoop_0_OuterShuffle_hls_3": {
-        "SIMD": 16
+        "SIMD": 4
+  },
+  "FINNLoop_0_body_FINNLoop_0_InnerShuffle_rtl_1": {
+    "SIMD": 4
+  },
+  "FINNLoop_0_body_FINNLoop_0_InnerShuffle_rtl_2": {
+    "SIMD": 4
+  },
+  "FINNLoop_0_body_FINNLoop_0_OuterShuffle_hls_4": {
+    "SIMD": 4
+  },
+  "FINNLoop_0_body_FINNLoop_0_OuterShuffle_hls_5": {
+    "SIMD": 4
+  },
+  "FINNLoop_0_body_FINNLoop_0_InnerShuffle_rtl_3": {
+    "SIMD": 4
+  },
+  "FINNLoop_0_body_FINNLoop_0_InnerShuffle_rtl_4": {
+    "SIMD": 1
+  },
+  "FINNLoop_0_body_FINNLoop_0_OuterShuffle_hls_6": {
+    "SIMD": 1
+  },
+  "FINNLoop_0_body_FINNLoop_0_OuterShuffle_hls_7": {
+    "SIMD": 1
   },
   "FINNLoop_0_body_FINNLoop_0_MVAU_rtl_5": {
     "PE": 16,
@@ -462,10 +486,7 @@
         "SIMD": 4
   },
     "OuterShuffle_hls_4": {
-        "SIMD": 4
-  },
-  "InnerShuffle_rtl_4": {
-    "SIMD": 2
+        "SIMD": 1
   },
   "Thresholding_rtl_3": {
     "PE": 1,
@@ -511,9 +532,6 @@
     "mem_mode": "dynamic",
     "runtime_writeable_weights": 0,
     "pumpedCompute": 0
-  },
-    "OuterShuffle_hls_5": {
-        "SIMD": 1
   },
   "Thresholding_rtl_6": {
     "PE": 1,

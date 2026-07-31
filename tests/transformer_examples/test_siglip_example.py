@@ -102,6 +102,48 @@ def test_default_profile_records_verified_w6a7_contract():
     assert folding["MVAU_rtl_0"]["SIMD"] == 8
     assert folding["MVAU_rtl_1"]["PE"] == 32
     assert folding["MVAU_rtl_1"]["SIMD"] == 7
+    top_outer_shuffles = {key for key in folding if key.startswith("OuterShuffle_hls_")}
+    top_inner_shuffles = {key for key in folding if key.startswith("InnerShuffle_rtl_")}
+    loop_outer_prefix = "FINNLoop_0_body_FINNLoop_0_OuterShuffle_hls_"
+    loop_inner_prefix = "FINNLoop_0_body_FINNLoop_0_InnerShuffle_rtl_"
+    assert top_outer_shuffles == {f"OuterShuffle_hls_{index}" for index in range(5)}
+    assert top_inner_shuffles == {f"InnerShuffle_rtl_{index}" for index in range(4)}
+    assert [folding[f"OuterShuffle_hls_{index}"]["SIMD"] for index in range(5)] == [
+        8,
+        2,
+        2,
+        4,
+        1,
+    ]
+    assert [folding[f"InnerShuffle_rtl_{index}"]["SIMD"] for index in range(4)] == [
+        3,
+        2,
+        2,
+        2,
+    ]
+    assert {key for key in folding if key.startswith(loop_outer_prefix)} == {
+        f"{loop_outer_prefix}{index}" for index in range(8)
+    }
+    assert {key for key in folding if key.startswith(loop_inner_prefix)} == {
+        f"{loop_inner_prefix}{index}" for index in range(5)
+    }
+    assert [folding[f"{loop_outer_prefix}{index}"]["SIMD"] for index in range(8)] == [
+        16,
+        16,
+        16,
+        4,
+        4,
+        4,
+        1,
+        1,
+    ]
+    assert [folding[f"{loop_inner_prefix}{index}"]["SIMD"] for index in range(5)] == [
+        4,
+        4,
+        4,
+        4,
+        1,
+    ]
     for name in ("MVAU_hls_0", "MVAU_hls_1", "MVAU_hls_2"):
         assert folding[name]["PE"] == 1
         assert folding[name]["weight_buffer_count"] == 1
