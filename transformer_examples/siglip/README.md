@@ -127,11 +127,12 @@ requires every profile entry to match the decomposed graph before continuing.
 The reviewed VCK190 schedule uses one local matrix buffer for untiled
 external-weight MVAUs and `TH=4` tiled AXI-MM streaming for the six loop-body
 weight matrices. This keeps the full image tower within device memory at the
-cost of serializing some weight loads and rereading tiled weights. Reported RTL
-throughput therefore belongs to this exact folding and ideal-memory contract.
+cost of serializing some weight loads and rereading tiled weights. Any future
+RTL throughput result must therefore use this exact folding and ideal-memory
+contract.
 FIFO depths are capped at 32 after automatic sizing to keep the stitched design
-within VCK190 memory capacity; this can reduce throughput, so the reported
-throughput is measured from this capped schedule. The large top-level residual
+within VCK190 memory capacity; this can reduce throughput, so a future
+measurement must use this capped schedule. The large top-level residual
 parameter buffer uses block RAM rather than Vivado's automatic URAM mapping.
 The two top-level attention matrix multiplications use the same legal
 `PE`/`SIMD` foldings as their loop-body counterparts. The attention dynamic
