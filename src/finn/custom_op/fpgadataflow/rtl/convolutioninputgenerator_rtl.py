@@ -594,6 +594,7 @@ class ConvolutionInputGenerator_rtl(ConvolutionInputGenerator, RTLBackend):
         cntr_bitwidth = math.ceil(
             math.log2(
                 max(
+                    1,
                     loop_h_iterations - 2 + 1,
                     loop_w_iterations - 2 + 1,
                     loop_kh_iterations - 2 + 1,

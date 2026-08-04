@@ -93,6 +93,33 @@ def prepare_inputs(input_tensor):
     return {"inp": input_tensor}
 
 
+def test_parallel_codegen_single_output_window():
+    node = helper.make_node(
+        "ConvolutionInputGenerator_rtl",
+        ["inp"],
+        ["outp"],
+        domain="finn.custom_op.fpgadataflow.rtl",
+        backend="fpgadataflow",
+        ConvKernelDim=[3, 3],
+        IFMChannels=256,
+        IFMDim=[3, 3],
+        OFMDim=[1, 1],
+        SIMD=256,
+        Stride=[1, 1],
+        Dilation=[1, 1],
+        inputDataType="UINT2",
+        outputDataType="UINT2",
+        parallel_window=1,
+    )
+    inst = getCustomOp(node)
+
+    _, code_gen_dict = inst.prepare_codegen_parallel()
+
+    assert code_gen_dict["$CNTR_BITWIDTH$"] == ["0"]
+    assert code_gen_dict["$LAST_READ_ELEM$"] == ["8"]
+    assert code_gen_dict["$LAST_WRITE_ELEM$"] == ["8"]
+
+
 # input datatype
 @pytest.mark.parametrize("idt", [DataType["INT2"], DataType["UINT4"]])
 # kernel size
