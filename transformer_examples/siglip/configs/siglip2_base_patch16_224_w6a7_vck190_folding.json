@@ -1,7 +1,7 @@
 {
   "Defaults": {},
-    "OuterShuffle_hls_0": {
-        "SIMD": 8
+  "OuterShuffle_hls_0": {
+    "SIMD": 8
   },
   "InnerShuffle_rtl_0": {
     "SIMD": 3
@@ -12,8 +12,8 @@
     "depth_trigger_uram": 0,
     "depth_trigger_bram": 0
   },
-    "OuterShuffle_hls_1": {
-        "SIMD": 2
+  "OuterShuffle_hls_1": {
+    "SIMD": 2
   },
   "InnerShuffle_rtl_1": {
     "SIMD": 2
@@ -35,8 +35,8 @@
   "InnerShuffle_rtl_2": {
     "SIMD": 2
   },
-    "OuterShuffle_hls_2": {
-        "SIMD": 2
+  "OuterShuffle_hls_2": {
+    "SIMD": 2
   },
   "ElementwiseMul_rtl_0": {
     "PE": 1,
@@ -59,7 +59,7 @@
     "mem_mode": "internal_decoupled",
     "runtime_writeable_weights": 0
   },
-    "FINNLoop_0_body_FINNLoop_0_DuplicateStreams_rtl_0": {
+  "FINNLoop_0_body_FINNLoop_0_DuplicateStreams_rtl_0": {
     "PE": 1
   },
   "FINNLoop_0_body_FINNLoop_0_LayerNorm_rtl_0": {
@@ -83,7 +83,7 @@
     "depth_trigger_uram": 0,
     "depth_trigger_bram": 0
   },
-    "FINNLoop_0_body_FINNLoop_0_DuplicateStreams_rtl_1": {
+  "FINNLoop_0_body_FINNLoop_0_DuplicateStreams_rtl_1": {
     "PE": 1
   },
   "FINNLoop_0_body_FINNLoop_0_MVAU_rtl_0": {
@@ -155,14 +155,14 @@
     "mem_mode": "internal_decoupled",
     "runtime_writeable_weights": 0
   },
-    "FINNLoop_0_body_FINNLoop_0_OuterShuffle_hls_0": {
-        "SIMD": 16
+  "FINNLoop_0_body_FINNLoop_0_OuterShuffle_hls_0": {
+    "SIMD": 16
   },
-    "FINNLoop_0_body_FINNLoop_0_OuterShuffle_hls_1": {
-        "SIMD": 16
+  "FINNLoop_0_body_FINNLoop_0_OuterShuffle_hls_1": {
+    "SIMD": 16
   },
-    "FINNLoop_0_body_FINNLoop_0_OuterShuffle_hls_2": {
-        "SIMD": 16
+  "FINNLoop_0_body_FINNLoop_0_OuterShuffle_hls_2": {
+    "SIMD": 16
   },
   "FINNLoop_0_body_FINNLoop_0_InnerShuffle_rtl_0": {
     "SIMD": 4
@@ -224,8 +224,8 @@
     "depth_trigger_uram": 0,
     "depth_trigger_bram": 0
   },
-    "FINNLoop_0_body_FINNLoop_0_OuterShuffle_hls_3": {
-        "SIMD": 4
+  "FINNLoop_0_body_FINNLoop_0_OuterShuffle_hls_3": {
+    "SIMD": 4
   },
   "FINNLoop_0_body_FINNLoop_0_InnerShuffle_rtl_1": {
     "SIMD": 4
@@ -280,7 +280,7 @@
     "mem_mode": "internal_decoupled",
     "runtime_writeable_weights": 0
   },
-    "FINNLoop_0_body_FINNLoop_0_DuplicateStreams_rtl_2": {
+  "FINNLoop_0_body_FINNLoop_0_DuplicateStreams_rtl_2": {
     "PE": 1
   },
   "FINNLoop_0_body_FINNLoop_0_LayerNorm_rtl_1": {
@@ -327,7 +327,7 @@
     "mem_mode": "internal_decoupled",
     "runtime_writeable_weights": 0
   },
-    "FINNLoop_0_body_FINNLoop_0_DuplicateStreams_rtl_3": {
+  "FINNLoop_0_body_FINNLoop_0_DuplicateStreams_rtl_3": {
     "PE": 4
   },
   "FINNLoop_0_body_FINNLoop_0_ElementwiseMul_rtl_8": {
@@ -425,7 +425,7 @@
     "mem_mode": "internal_decoupled",
     "runtime_writeable_weights": 0
   },
-    "DuplicateStreams_rtl_0": {
+  "DuplicateStreams_rtl_0": {
     "PE": 1
   },
   "Thresholding_rtl_1": {
@@ -482,11 +482,11 @@
     "mem_mode": "internal_decoupled",
     "runtime_writeable_weights": 0
   },
-    "OuterShuffle_hls_3": {
-        "SIMD": 4
+  "OuterShuffle_hls_3": {
+    "SIMD": 4
   },
-    "OuterShuffle_hls_4": {
-        "SIMD": 1
+  "OuterShuffle_hls_4": {
+    "SIMD": 1
   },
   "Thresholding_rtl_3": {
     "PE": 1,
@@ -561,7 +561,7 @@
     "mem_mode": "internal_decoupled",
     "runtime_writeable_weights": 0
   },
-    "DuplicateStreams_rtl_1": {
+  "DuplicateStreams_rtl_1": {
     "PE": 1
   },
   "LayerNorm_rtl_1": {
@@ -607,7 +607,7 @@
     "mem_mode": "internal_decoupled",
     "runtime_writeable_weights": 0
   },
-    "DuplicateStreams_rtl_2": {
+  "DuplicateStreams_rtl_2": {
     "PE": 1
   },
   "ElementwiseMul_rtl_8": {
