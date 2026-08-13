@@ -1114,7 +1114,15 @@ def step_set_fifo_depths(model: ModelWrapper, cfg: DataflowBuildConfig):
         model = model.transform(GiveUniqueNodeNames())
         model = model.transform(GiveReadableTensorNames())
         if cfg.folding_config_file is not None:
-            model = model.transform(ApplyConfig(cfg.folding_config_file))
+            # FINNLoop bodies were already FIFO-sized and code-generated before
+            # this main-graph pass. Reapplying their original folding settings
+            # here would make the body metadata disagree with the generated IP.
+            model = model.transform(
+                ApplyConfig(
+                    cfg.folding_config_file,
+                    recurse_subgraphs=not is_mlo(model),
+                )
+            )
 
     if cfg.fifo_depth_cap is not None:
         model = model.transform(CapFIFODepths(cfg.fifo_depth_cap))
@@ -1577,6 +1585,13 @@ def step_loop_body_set_fifo_depths(model: ModelWrapper, cfg: DataflowBuildConfig
         Loop body ModelWrapper with FIFOs sized
     """
     loop_context = model.get_metadata_prop("loop_context")
+    node_name_prefix = (loop_context + "_") if loop_context else ""
+    # Name loop-body nodes before any HLS code generation. Naming only the
+    # returned ONNX nodes after FIFO sizing leaves the generated HLS top modules
+    # with generic names such as StreamingDataWidthConverter_hls_0. Those names
+    # can collide with top-level HLS modules when a FINNLoop is compiled as part
+    # of a stitched XSI design.
+    model = model.transform(GiveUniqueNodeNames(prefix=node_name_prefix))
     # Prepare and synthesize IP for FIFO characterization
     model = model.transform(PrepareIP(cfg._resolve_fpga_part(), cfg._resolve_hls_clk_period()))
     model = model.transform(HLSSynthIP(cfg._resolve_hls_clk_period()))
@@ -1599,6 +1614,7 @@ def step_loop_body_set_fifo_depths(model: ModelWrapper, cfg: DataflowBuildConfig
             fifosim_input_throttle=cfg.fifosim_input_throttle,
             debug_log_dir=(_fifo_debug_live_dir(cfg) if cfg.debug_fifo else None),
             debug_log_prefix=(loop_context + "_") if loop_context else "",
+            node_name_prefix=node_name_prefix,
         )
     )
     # snapshot per-FIFO debug logs for this loop body before the live dir is reused
@@ -1611,9 +1627,7 @@ def step_loop_body_set_fifo_depths(model: ModelWrapper, cfg: DataflowBuildConfig
     # hence IP/module) names stay unique across the whole design. Without this
     # the loop body's stitched IP uses generic names that collide with the main
     # graph's nodes at top-level stitching, elaborating as a black box (X output).
-    model = model.transform(
-        GiveUniqueNodeNames(prefix=(loop_context + "_") if loop_context else "")
-    )
+    model = model.transform(GiveUniqueNodeNames(prefix=node_name_prefix))
     model = model.transform(GiveReadableTensorNames())
 
     return model

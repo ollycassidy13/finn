@@ -17,6 +17,7 @@ from qonnx.util.basic import gen_finn_dt_tensor, qonnx_make_model
 import finn.builder.build_dataflow as build
 import finn.builder.build_dataflow_config as build_cfg
 import finn.core.onnx_exec as oxe
+from finn.custom_op.fpgadataflow.rtl.finn_loop import _get_stream_tap_adjacency
 from finn.transformation.fpgadataflow.compile_cppsim import CompileCppSim
 from finn.transformation.fpgadataflow.prepare_cppsim import PrepareCppSim
 from finn.transformation.fpgadataflow.set_exec_mode import SetExecMode
@@ -30,6 +31,34 @@ verif_steps = [
 
 fpga_part = "xcvc1902-vsva2197-2MP-e-S"
 clk_ns = 5
+
+
+def test_stream_tap_adjacency_includes_hls_mvau_fork():
+    """HLS MVAUs in a Q/K/V fork must receive the forwarded loop index."""
+    activation = create_tensor_info("activation", [1, 8])
+    weights = [create_tensor_info(f"weights_{name}", [8, 8]) for name in ("q", "k", "v")]
+    outputs = [create_tensor_info(f"output_{name}", [1, 8]) for name in ("q", "k", "v")]
+    nodes = [
+        helper.make_node(
+            "MVAU_hls",
+            ["activation", f"weights_{name}"],
+            [f"output_{name}"],
+            name=f"MVAU_hls_{name}",
+            domain="finn.custom_op.fpgadataflow.hls",
+            mlo_max_iter=12,
+        )
+        for name in ("q", "k", "v")
+    ]
+    graph = helper.make_graph(nodes, "qkv", [activation] + weights, outputs)
+    loop_body = ModelWrapper(qonnx_make_model(graph, producer_name="qkv-loop-body"))
+
+    _, pruned_adjacency = _get_stream_tap_adjacency(loop_body)
+
+    assert pruned_adjacency["__INPUT0__"] == [
+        "MVAU_hls_q",
+        "MVAU_hls_k",
+        "MVAU_hls_v",
+    ]
 
 
 def generate_random_threshold_values(data_type, num_input_channels, num_steps):
