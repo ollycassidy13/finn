@@ -70,6 +70,24 @@ class _FakeMLOFoldingModel:
         return []
 
 
+def test_characterization_period_excludes_skipped_loop(monkeypatch):
+    ordinary = SimpleNamespace(name="ordinary", op_type="FakeRTL")
+    loop = SimpleNamespace(name="loop", op_type="FINNLoop")
+    model = SimpleNamespace(graph=SimpleNamespace(node=[ordinary, loop]))
+    cycles = {"ordinary": 100, "loop": 10_000}
+
+    monkeypatch.setattr(steps, "is_hls_node", lambda _node: False)
+    monkeypatch.setattr(steps, "is_rtl_node", lambda _node: True)
+    monkeypatch.setattr(
+        steps,
+        "getCustomOp",
+        lambda node: SimpleNamespace(get_nodeattr=lambda _name: cycles[node.name]),
+    )
+
+    assert steps._get_characterization_period(model) == 10_010
+    assert steps._get_characterization_period(model, {loop.name}) == 110
+
+
 class _FakeLoopBodyModel:
     def __init__(self, loop_context):
         self.loop_context = loop_context
