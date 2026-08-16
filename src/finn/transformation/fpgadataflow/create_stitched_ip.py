@@ -31,6 +31,7 @@ import filecmp
 import json
 import multiprocessing as mp
 import os
+import re
 import subprocess
 import warnings
 from qonnx.custom_op.registry import getCustomOp
@@ -45,6 +46,7 @@ from finn.util.basic import make_build_dir, resolve_xilinx_tool
 from finn.util.fpgadataflow import is_hls_node, is_rtl_node
 
 RTLSIM_SOURCE_EXTENSIONS = {".v", ".sv", ".vh", ".svh", ".vhd"}
+GENERATED_NODE_SOURCE_RE = re.compile(r"_(?:rtl|hls)_\d+(?:_[^.]+)?\.(?:v|sv)$", re.IGNORECASE)
 
 
 def _raise_on_conflicting_source(existing_path, source_path):
@@ -74,13 +76,7 @@ def append_missing_finnloop_rtlsim_sources(model, v_file_list):
     with open(v_file_list) as f:
         existing_sources = [line.strip() for line in f if line.strip()]
     existing_paths = set(existing_sources)
-    existing_by_basename = {}
-    for source_path in existing_sources:
-        source_basename = os.path.basename(source_path)
-        if source_basename in existing_by_basename:
-            _raise_on_conflicting_source(existing_by_basename[source_basename], source_path)
-        else:
-            existing_by_basename[source_basename] = source_path
+    existing_by_basename = {os.path.basename(path): path for path in existing_sources}
     appended_sources = []
 
     for node in model.graph.node:
@@ -102,7 +98,12 @@ def append_missing_finnloop_rtlsim_sources(model, v_file_list):
                 continue
             if source_basename in existing_by_basename:
                 existing_path = existing_by_basename[source_basename]
-                _raise_on_conflicting_source(existing_path, source_path)
+                # Shared RTL helpers can intentionally use the same module or
+                # package basename with node-specific contents. The liveness
+                # hazard addressed here is a generated node wrapper silently
+                # shadowing another generated node wrapper.
+                if GENERATED_NODE_SOURCE_RE.search(source_basename):
+                    _raise_on_conflicting_source(existing_path, source_path)
                 continue
             appended_sources.append(source_path)
             existing_paths.add(source_path)
