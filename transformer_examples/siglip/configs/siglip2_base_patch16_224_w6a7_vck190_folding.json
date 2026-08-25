@@ -63,7 +63,8 @@
     "PE": 1
   },
   "FINNLoop_0_body_FINNLoop_0_LayerNorm_rtl_0": {
-    "SIMD": 2
+    "SIMD": 2,
+    "numRsqrtRefinements": 2
   },
   "FINNLoop_0_body_FINNLoop_0_ElementwiseMul_rtl_0": {
     "PE": 1,
@@ -284,7 +285,8 @@
     "PE": 1
   },
   "FINNLoop_0_body_FINNLoop_0_LayerNorm_rtl_1": {
-    "SIMD": 2
+    "SIMD": 2,
+    "numRsqrtRefinements": 2
   },
   "FINNLoop_0_body_FINNLoop_0_ElementwiseMul_rtl_6": {
     "PE": 1,
