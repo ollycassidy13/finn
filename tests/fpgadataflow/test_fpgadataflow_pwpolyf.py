@@ -517,15 +517,22 @@ def test_pwpolyf_generate_hdl(func, fold):
 
     code_gen_dir = inst.get_nodeattr("code_gen_dir_ipgen")
     assert code_gen_dir, "code_gen_dir_ipgen not set after PrepareIP"
-    assert os.path.isfile(os.path.join(code_gen_dir, "pwpolyf_pkg.sv"))
-    assert os.path.isfile(os.path.join(code_gen_dir, "pwpolyf.sv"))
-    assert os.path.isfile(os.path.join(code_gen_dir, "queue.sv"))
-
     topname = inst.get_nodeattr("gen_top_module")
+    package_path = os.path.join(code_gen_dir, topname + "_pwpolyf_pkg.sv")
+    core_path = os.path.join(code_gen_dir, topname + "_pwpolyf.sv")
+    queue_path = os.path.join(code_gen_dir, topname + "_queue.sv")
+    assert os.path.isfile(package_path)
+    assert os.path.isfile(core_path)
+    assert os.path.isfile(queue_path)
     assert os.path.isfile(os.path.join(code_gen_dir, topname + ".v"))
 
-    with open(os.path.join(code_gen_dir, "pwpolyf_pkg.sv"), "r") as f:
+    with open(package_path, "r") as f:
         pkg_content = f.read()
+    with open(core_path, "r") as f:
+        core_content = f.read()
+    assert "package %s_pwpolyf_pkg;" % topname in pkg_content
+    assert "import %s_pwpolyf_pkg::*;" % topname in core_content
+    assert "module %s_pwpolyf " % topname in core_content
     assert "DEGREE      = 2;" in pkg_content
     assert "K           = 3;" in pkg_content
     assert func.upper() + " = '{" in pkg_content

@@ -3,7 +3,7 @@
 
 import numpy as np
 import os
-import shutil
+import re
 from qonnx.core.datatype import DataType
 
 from finn.custom_op.fpgadataflow.pwpolyf import PWPolyF
@@ -22,7 +22,7 @@ def _float_to_hex(f):
     return array2hexstring(np.array([f]), DataType["FLOAT32"], 32, prefix="").upper()
 
 
-def _generate_coeffs_pkg_data(K, degree=2, num_samples=1000):
+def _generate_coeffs_pkg_data(K, degree=2, num_samples=1000, package_name="pwpolyf_pkg"):
     """Generate the pwpolyf_pkg.sv package content for a given K value.
 
     Produces a SystemVerilog package with a func_cfg_t struct per activation
@@ -37,7 +37,7 @@ def _generate_coeffs_pkg_data(K, degree=2, num_samples=1000):
         "// DEGREE=%d K=%d NUM_OCTAVES=%d  Segments: %d" % (degree, K, NUM_OCTAVES, num_segs)
     )
     lines.append("")
-    lines.append("package pwpolyf_pkg;")
+    lines.append("package %s;" % package_name)
     lines.append("")
     lines.append("    localparam int unsigned  DEGREE      = %d;" % degree)
     lines.append("    localparam int unsigned  K           = %d;" % K)
@@ -92,10 +92,29 @@ class PWPolyF_rtl(PWPolyF, RTLBackend):
         my_attrs.update(RTLBackend.get_nodeattr_types(self))
         return my_attrs
 
-    def _generate_coeffs_pkg(self, num_samples=1000):
+    def _generate_coeffs_pkg(self, num_samples=1000, package_name="pwpolyf_pkg"):
         K = self.get_nodeattr("K")
         degree = self.get_nodeattr("degree")
-        return _generate_coeffs_pkg_data(K, degree=degree, num_samples=num_samples)
+        return _generate_coeffs_pkg_data(
+            K,
+            degree=degree,
+            num_samples=num_samples,
+            package_name=package_name,
+        )
+
+    def _namespaced_rtl_file(self, filename):
+        return "%s_%s" % (self.get_nodeattr("gen_top_module"), filename)
+
+    def _namespace_rtl(self, source):
+        namespace = self.get_nodeattr("gen_top_module")
+        identifiers = ["pwpolyf_dspfp32", "pwpolyf_pkg", "pwpolyf", "queue"]
+        for identifier in identifiers:
+            source = re.sub(
+                r"\b%s\b" % re.escape(identifier),
+                "%s_%s" % (namespace, identifier),
+                source,
+            )
+        return source
 
     def generate_hdl(self, model, fpgapart, clk):
         rtllib_dir = os.path.join(os.environ["FINN_ROOT"], "finn-rtllib/pwpolyf/hdl/")
@@ -122,16 +141,24 @@ class PWPolyF_rtl(PWPolyF, RTLBackend):
             template = f.read()
         for key, value in code_gen_dict.items():
             template = template.replace(key, str(value))
+        template = self._namespace_rtl(template)
         with open(os.path.join(code_gen_dir, topname + ".v"), "w") as f:
             f.write(template)
 
-        # copy RTL source files
+        # Generate node-scoped helper modules so flattened stitched simulation
+        # cannot bind this node to another PWPolyF node's coefficient package.
         for sv_file in ["pwpolyf.sv", "queue.sv"]:
-            shutil.copy(rtllib_dir + sv_file, code_gen_dir)
+            with open(rtllib_dir + sv_file, "r") as f:
+                source = self._namespace_rtl(f.read())
+            with open(os.path.join(code_gen_dir, self._namespaced_rtl_file(sv_file)), "w") as f:
+                f.write(source)
 
         # generate package with coefficients matching the node's K and degree
-        pkg_data = self._generate_coeffs_pkg()
-        with open(os.path.join(code_gen_dir, "pwpolyf_pkg.sv"), "w") as f:
+        package_name = "%s_pwpolyf_pkg" % topname
+        pkg_data = self._generate_coeffs_pkg(package_name=package_name)
+        with open(
+            os.path.join(code_gen_dir, self._namespaced_rtl_file("pwpolyf_pkg.sv")), "w"
+        ) as f:
             f.write(pkg_data)
 
         self.set_nodeattr("ipgen_path", code_gen_dir)
@@ -140,15 +167,13 @@ class PWPolyF_rtl(PWPolyF, RTLBackend):
     def get_rtl_file_list(self, abspath=False):
         if abspath:
             code_gen_dir = self.get_nodeattr("code_gen_dir_ipgen") + "/"
-            rtllib_dir = os.path.join(os.environ["FINN_ROOT"], "finn-rtllib/pwpolyf/hdl/")
         else:
             code_gen_dir = ""
-            rtllib_dir = ""
 
         verilog_files = [
-            code_gen_dir + "pwpolyf_pkg.sv",
-            rtllib_dir + "pwpolyf.sv",
-            rtllib_dir + "queue.sv",
+            code_gen_dir + self._namespaced_rtl_file("pwpolyf_pkg.sv"),
+            code_gen_dir + self._namespaced_rtl_file("pwpolyf.sv"),
+            code_gen_dir + self._namespaced_rtl_file("queue.sv"),
             code_gen_dir + self.get_nodeattr("gen_top_module") + ".v",
         ]
         return verilog_files
@@ -164,9 +189,9 @@ class PWPolyF_rtl(PWPolyF, RTLBackend):
         code_gen_dir = self.get_nodeattr("code_gen_dir_ipgen")
 
         sourcefiles = [
-            "pwpolyf_pkg.sv",
-            "pwpolyf.sv",
-            "queue.sv",
+            self._namespaced_rtl_file("pwpolyf_pkg.sv"),
+            self._namespaced_rtl_file("pwpolyf.sv"),
+            self._namespaced_rtl_file("queue.sv"),
         ]
         sourcefiles.append(self.get_nodeattr("gen_top_module") + ".v")
         sourcefiles = [os.path.join(code_gen_dir, f) for f in sourcefiles]

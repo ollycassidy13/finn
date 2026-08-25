@@ -87,6 +87,10 @@ def compile_sim_obj(top_module_name, source_list, sim_out_dir, debug=False, beha
         "floating_point_v7_1_21",
         "floating_point_v7_0_26",
     ]
+    extra_libs = os.environ.get("FINN_XELAB_EXTRA_LIBS", "").replace(",", " ").split()
+    for lib in extra_libs:
+        if lib not in xelab_libs:
+            xelab_libs.append(lib)
 
     cmd_xelab = [
         resolve_xilinx_tool("xelab"),

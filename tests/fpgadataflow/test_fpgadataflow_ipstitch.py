@@ -194,8 +194,11 @@ def test_ipstitch_rejects_conflicting_nested_rtlsim_basename(tmp_path, monkeypat
         append_missing_finnloop_rtlsim_sources(model, str(top_list))
 
 
+@pytest.mark.parametrize("nested_already_listed", [False, True])
 @pytest.mark.fpgadataflow
-def test_ipstitch_allows_shared_helper_basename_variants(tmp_path, monkeypatch):
+def test_ipstitch_rejects_conflicting_package_basename(
+    tmp_path, monkeypatch, nested_already_listed
+):
     top_source = tmp_path / "top" / "pwpolyf_pkg.sv"
     nested_source = tmp_path / "loop" / "pwpolyf_pkg.sv"
     top_source.parent.mkdir()
@@ -203,7 +206,10 @@ def test_ipstitch_allows_shared_helper_basename_variants(tmp_path, monkeypatch):
     top_source.write_text("package pwpolyf_pkg; localparam int A = 1; endpackage\n")
     nested_source.write_text("package pwpolyf_pkg; localparam int A = 2; endpackage\n")
     top_list = tmp_path / "all_verilog_srcs.txt"
-    top_list.write_text(str(top_source) + "\n")
+    top_sources = [top_source]
+    if nested_already_listed:
+        top_sources.append(nested_source)
+    top_list.write_text("\n".join(map(str, top_sources)) + "\n")
     (nested_source.parent / "all_verilog_srcs.txt").write_text(str(nested_source) + "\n")
     model = FakeModel([FakeNode("FINNLoop", str(nested_source.parent))])
     monkeypatch.setattr(
@@ -212,8 +218,8 @@ def test_ipstitch_allows_shared_helper_basename_variants(tmp_path, monkeypatch):
         lambda node: FakeHWCustomOp(node.code_gen_dir),
     )
 
-    append_missing_finnloop_rtlsim_sources(model, str(top_list))
-    assert top_list.read_text().splitlines() == [str(top_source)]
+    with pytest.raises(RuntimeError, match="Conflicting stitched-RTL sources"):
+        append_missing_finnloop_rtlsim_sources(model, str(top_list))
 
 
 def create_one_fc_model(mem_mode="internal_embedded"):
