@@ -460,7 +460,7 @@ class InferInnerOuterShuffles(Transformation):
                 perm = f_inst.get_nodeattr("perm")
                 simd = f_inst.get_nodeattr("SIMD")
 
-                if _is_inner_shuffle(perm, in_shape):
+                if _is_inner_shuffle(perm, in_reshaped):
                     # Get original node name if it exists, otherwise use current node name
                     try:
                         original_name = f_inst.get_nodeattr("original_node_name") or node.name
@@ -474,7 +474,8 @@ class InferInnerOuterShuffles(Transformation):
                         [new_out_tensor],
                         domain="finn.custom_op.fpgadataflow",
                         backend="fpgadataflow",
-                        in_shape=in_reshaped,
+                        in_shape=in_shape,  # physical shape (matches the input tensor)
+                        transpose_in_shape=in_reshaped,  # logical (post-fused-reshape) shape
                         data_type=data_type,
                         perm=perm,
                         name=f"InnerShuffle_{node.name}",

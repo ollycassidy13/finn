@@ -13,6 +13,9 @@ from finn.transformation.general import ApplyConfig
 
 
 class _FakeMLOModel:
+    def __init__(self):
+        self.metadata = {}
+
     def transform(self, _transformation):
         return self
 
@@ -22,6 +25,9 @@ class _FakeMLOModel:
     def get_nodes_by_op_type(self, op_type):
         assert op_type == "FINNLoop"
         return [object()]
+
+    def set_metadata_prop(self, name, value):
+        self.metadata[name] = value
 
 
 class _FakeFIFO:
@@ -140,8 +146,6 @@ def test_mlo_performance_step_uses_two_frames_and_ideal_memory(tmp_path, monkeyp
         return prehook
 
     monkeypatch.setattr(steps, "mlo_prehook_func_factory", fake_prehook_factory)
-    monkeypatch.setattr(steps, "get_liveness_threshold_cycles", lambda: 123)
-
     def fake_throughput_test(model_arg, clk_ns, **kwargs):
         call.update(model=model_arg, clk_ns=clk_ns, **kwargs)
         return {
@@ -176,6 +180,7 @@ def test_mlo_performance_step_uses_two_frames_and_ideal_memory(tmp_path, monkeyp
     assert call["collect_performance"] is True
     assert call["input_data_pattern"] == "all_zero"
     assert call["prehook_kwargs"] == {"external_weight_data_pattern": "all_zero"}
+    assert model.metadata["rtlsim_liveness_estimate"] == "160"
 
     with open(tmp_path / "report" / "rtlsim_performance.json") as report_file:
         report = json.load(report_file)
