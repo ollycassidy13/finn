@@ -6,12 +6,15 @@ import pytest
 import json
 import numpy as np
 import onnx
+import qonnx.core.onnx_exec as oxe
 import sys
 from onnx import TensorProto, helper, numpy_helper
 from pathlib import Path
 from qonnx.core.datatype import DataType
 from qonnx.core.modelwrapper import ModelWrapper
+from qonnx.custom_op.registry import getCustomOp
 from qonnx.transformation.general import GiveReadableTensorNames, GiveUniqueNodeNames
+from qonnx.transformation.infer_datatypes import InferDataTypes
 from qonnx.transformation.infer_shapes import InferShapes
 from types import SimpleNamespace
 
@@ -30,6 +33,7 @@ from transformer_examples.siglip.mlo import (  # noqa: E402
 from transformer_examples.siglip.phases import (  # noqa: E402
     _absorb_pre_matmul_dequant,
     _DuplicateSafeModelWrapper,
+    _fold_quantized_matmul_into_multithreshold,
     _integerize_static_lhs_matmul,
     _select_graph_output,
     make_siglip_folding_step,
@@ -281,6 +285,124 @@ def test_moves_scalar_dequant_after_static_weight_matmul():
         np.asarray([0.125, 0.1875, 0.25], dtype=np.float32),
     )
     assert "dequant" not in [node.name for node in model.graph.node]
+
+
+@pytest.mark.parametrize("head_scale", [np.float32(0.5), None])
+def test_folds_quantized_projection_into_integer_thresholds(head_scale):
+    codes = np.arange(-5, 6, dtype=np.float32).reshape(-1, 1)
+    codes = np.concatenate([codes, -codes], axis=1)
+    weights = np.eye(2, dtype=np.float32)
+    activation_scale = np.float32(0.5)
+    weight_scale = np.asarray([0.5, 0.25], dtype=np.float32)
+    bias = np.asarray([0.25, -0.125], dtype=np.float32)
+    effective_head_scale = np.float32(1.0) if head_scale is None else head_scale
+    output_scale = np.float32(0.25)
+    output_bias = np.float32(-4.0)
+
+    lower_levels = np.arange(-4, 3, dtype=np.int64)
+    thresholds = ((lower_levels.astype(np.float64) + 0.5) * output_scale).astype(np.float32)
+    lower_even = (lower_levels % 2) == 0
+    thresholds[lower_even] = np.nextafter(thresholds[lower_even], np.float32(np.inf))
+    thresholds = thresholds.reshape(1, -1)
+
+    raw = helper.make_tensor_value_info("raw", TensorProto.FLOAT, list(codes.shape))
+    y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [codes.shape[0], 2, 1])
+    nodes = [
+        helper.make_node(
+            "MultiThreshold",
+            ["raw", "input_thresholds"],
+            ["input_count"],
+            name="input_quantize",
+            domain="qonnx.custom_op.general",
+            out_dtype="UINT4",
+            data_layout="NHWC",
+        ),
+        helper.make_node("Add", ["input_count", "input_bias"], ["x"], name="input_bias"),
+        helper.make_node("Mul", ["x", "activation_scale"], ["x_scaled"], name="dequant"),
+        helper.make_node("MatMul", ["x_scaled", "weights"], ["acc"], name="projection"),
+        helper.make_node("Mul", ["acc", "weight_scale"], ["weighted"], name="weight_scale"),
+        helper.make_node("Add", ["weighted", "bias"], ["biased"], name="bias"),
+        helper.make_node("Reshape", ["biased", "shape"], ["reshaped"], name="reshape"),
+        helper.make_node(
+            "Transpose", ["reshaped"], ["transposed"], name="transpose", perm=[0, 2, 1]
+        ),
+    ]
+    multithreshold_input = "transposed"
+    if head_scale is not None:
+        nodes.append(
+            helper.make_node("Mul", ["transposed", "head_scale"], ["scaled"], name="head_scale")
+        )
+        multithreshold_input = "scaled"
+    nodes.extend(
+        [
+            helper.make_node(
+                "MultiThreshold",
+                [multithreshold_input, "thresholds"],
+                ["quant_count"],
+                name="quantize",
+                domain="qonnx.custom_op.general",
+                out_dtype="UINT3",
+            ),
+            helper.make_node(
+                "Add", ["quant_count", "output_bias"], ["quant_code"], name="quant_bias"
+            ),
+            helper.make_node("Mul", ["quant_code", "output_scale"], ["y"], name="quant_scale"),
+        ]
+    )
+    initializers = [
+        numpy_helper.from_array(
+            np.arange(-4.5, 5.0, dtype=np.float32).reshape(1, -1), "input_thresholds"
+        ),
+        numpy_helper.from_array(np.asarray(-5.0, dtype=np.float32), "input_bias"),
+        numpy_helper.from_array(np.asarray(activation_scale), "activation_scale"),
+        numpy_helper.from_array(weights, "weights"),
+        numpy_helper.from_array(weight_scale.reshape(1, -1), "weight_scale"),
+        numpy_helper.from_array(bias, "bias"),
+        numpy_helper.from_array(np.asarray([codes.shape[0], 1, 2], dtype=np.int64), "shape"),
+        numpy_helper.from_array(thresholds, "thresholds"),
+        numpy_helper.from_array(np.asarray(output_bias), "output_bias"),
+        numpy_helper.from_array(np.asarray(output_scale), "output_scale"),
+    ]
+    if head_scale is not None:
+        initializers.append(numpy_helper.from_array(np.asarray(head_scale), "head_scale"))
+    graph = helper.make_graph(nodes, "quantized-projection", [raw], [y], initializer=initializers)
+    model = ModelWrapper(helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)]))
+    model.set_tensor_datatype("weights", DataType["INT2"])
+    model = model.transform(InferShapes()).transform(InferDataTypes())
+
+    model = _fold_quantized_matmul_into_multithreshold(model)
+
+    projection = next(node for node in model.graph.node if node.name == "projection")
+    quantize = next(node for node in model.graph.node if node.name == "quantize")
+    reshape = next(node for node in model.graph.node if node.name == "reshape")
+    transpose = next(node for node in model.graph.node if node.name == "transpose")
+    assert list(projection.input) == ["x", "weights"]
+    assert quantize.input[0] == "acc"
+    assert reshape.input[0] == quantize.output[0]
+    assert transpose.output[0] == "quant_count"
+    assert getCustomOp(quantize).get_nodeattr("data_layout") == "NHWC"
+    assert not {"dequant", "weight_scale", "bias", "head_scale"}.intersection(
+        node.name for node in model.graph.node
+    )
+
+    accumulator_boundaries = (
+        (lower_levels.astype(np.float64) + 0.5) * output_scale
+        - bias.reshape(-1, 1) * effective_head_scale
+    ) / (activation_scale * weight_scale.reshape(-1, 1) * effective_head_scale)
+    expected_thresholds = np.ceil(accumulator_boundaries)
+    expected_thresholds[:, lower_even] = np.floor(accumulator_boundaries[:, lower_even]) + 1
+    np.testing.assert_array_equal(
+        model.get_initializer(quantize.input[1]), expected_thresholds.astype(np.float32)
+    )
+
+    accumulator = codes.astype(np.int64) @ weights.astype(np.int64)
+    real = (
+        accumulator * activation_scale * weight_scale.reshape(1, -1) + bias.reshape(1, -1)
+    ) * effective_head_scale
+    expected = np.clip(np.rint(real / output_scale), -4, 3) * output_scale
+    expected = expected.reshape(codes.shape[0], 1, 2).transpose(0, 2, 1)
+    actual = oxe.execute_onnx(model, {"raw": codes})["y"]
+    np.testing.assert_array_equal(actual, expected.astype(np.float32))
 
 
 def test_integerizes_exact_static_attention_query_once():
