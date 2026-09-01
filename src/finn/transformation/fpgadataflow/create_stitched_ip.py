@@ -43,6 +43,7 @@ from finn.transformation.fpgadataflow.replace_verilog_relpaths import (
 from finn.util.basic import make_build_dir, resolve_xilinx_tool
 from finn.util.fpgadataflow import is_hls_node, is_rtl_node
 
+
 def is_external_input(model, node, i):
     # indicate whether input i of node should be made external
     # True only if input is unconnected and has no initializer

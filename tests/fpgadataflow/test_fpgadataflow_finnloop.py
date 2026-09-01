@@ -800,7 +800,7 @@ def test_finnloop_end2end_mlo(
         and elemwise_optype == "ElementwiseAdd_hls"
         and rhs_shape == [1]
         and eltw_param_dtype == "INT8"
-        and not tail_node
+        and not non_mlo_nodes
     )
     generate_outputs = [
         build_cfg.DataflowOutputType.ESTIMATE_REPORTS,

@@ -151,8 +151,7 @@ class AbsorbScalarBiasIntoMultiThreshold(Transformation):
                     for candidate in DataType.get_accumulator_dt_cands():
                         odt = DataType[candidate]
                         if all(
-                            odt.allowed(value)
-                            for value in range(int(new_min), int(new_max) + 1)
+                            odt.allowed(value) for value in range(int(new_min), int(new_max) + 1)
                         ):
                             break
                     else:
