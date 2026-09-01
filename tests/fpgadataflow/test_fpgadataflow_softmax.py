@@ -77,7 +77,7 @@ def test_hwsoftmax_rtl_generated_helpers_are_node_scoped():
         inst = getCustomOp(model.graph.node[0])
         topname = inst.get_nodeattr("gen_top_module")
         source_paths = inst.get_rtl_file_list(abspath=True)
-        helper_paths = source_paths[:-1]
+        helper_paths = source_paths[: len(inst._rtllib_files())]
         assert all(os.path.basename(path).startswith(topname + "_") for path in helper_paths)
 
         sources = {os.path.basename(path): Path(path).read_text() for path in helper_paths}

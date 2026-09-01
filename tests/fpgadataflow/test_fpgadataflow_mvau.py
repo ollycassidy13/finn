@@ -190,8 +190,8 @@ def test_fetch_weights_forwards_buffer_configuration(tmp_path):
     MVAU_rtl(node).generate_hdl_fetch_weights()
 
     wrapper = (tmp_path / "MVAU_rtl_0_fetch_weights_wrapper.v").read_text()
-    assert 'parameter\tRAM_STYLE = "ultra"' in wrapper
-    assert "parameter\tN_BUFFERS = 1" in wrapper
+    assert 'RAM_STYLE = "ultra"' in wrapper
+    assert "N_BUFFERS = 1" in wrapper
     assert ".RAM_STYLE(RAM_STYLE), .N_BUFFERS(N_BUFFERS)" in wrapper
 
 

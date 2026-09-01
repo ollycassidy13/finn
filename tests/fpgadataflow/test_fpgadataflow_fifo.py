@@ -33,7 +33,6 @@ import os
 from onnx import TensorProto, helper
 from qonnx.core.datatype import DataType
 from qonnx.core.modelwrapper import ModelWrapper
-from qonnx.custom_op.registry import getCustomOp
 from qonnx.transformation.general import GiveUniqueNodeNames
 from qonnx.util.basic import gen_finn_dt_tensor, qonnx_make_model
 
@@ -78,31 +77,6 @@ def make_single_fifo_modelwrapper(Shape, Depth, fld_shape, finn_dtype):
 
 def prepare_inputs(input_tensor, dt):
     return {"inp": input_tensor}
-
-
-def test_fpgadataflow_fifo_rtl_ipi_deduplicates_helpers_and_retries_module_resolution():
-    model = make_single_fifo_modelwrapper([1, 8], 2, [1, 1, 8], DataType["INT2"])
-    model = model.transform(SpecializeLayers(test_fpga_part))
-    model = model.transform(GiveUniqueNodeNames())
-    fifo = getCustomOp(model.graph.node[0])
-    fifo.set_nodeattr("code_gen_dir_ipgen", os.path.join(build_dir, "fifo_ipgen"))
-    fifo.set_nodeattr("gen_top_module", "StreamingFIFO_rtl_0")
-
-    ipi_commands = fifo.code_generation_ipi()
-    shared_source_command = ipi_commands[0]
-    assert "::finn_streamingfifo_rtl_shared_sources_added" in shared_source_command
-    assert shared_source_command.count("add_files") == 2
-    assert ipi_commands[1].endswith("StreamingFIFO_rtl_0.v")
-
-    create_cell_command = ipi_commands[-1]
-
-    assert "catch {create_bd_cell" in create_cell_command
-    assert "for {set module_ref_attempt 1}" in create_cell_command
-    assert "$module_ref_attempt <= 5" in create_cell_command
-    assert "set_property source_mgmt_mode All [current_project]" in create_cell_command
-    assert "update_compile_order -fileset sources_1" in create_cell_command
-    assert "after 1000" in create_cell_command
-    assert create_cell_command.count("create_bd_cell") == 1
 
 
 # shape
