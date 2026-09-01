@@ -1,44 +1,28 @@
-# SigLIP image-tower example
+# SigLIP ImageNet FINN example
 
-This example compiles the static image path of
-`google/siglip2-base-patch16-224` with FINN. It accepts a QONNX model exported
-by the QV-LSQ quantization flow, detects the 12 repeated vision-transformer
-blocks, rolls them into a `FINNLoop`, and builds estimates or VCK190 hardware.
-The quantizer and its checkpoints are deliberately not bundled with FINN.
+This example builds the image tower of `google/siglip2-base-patch16-224` for
+VCK190. The supplied profile expects a static `[1, 3, 224, 224]` ImageNet model
+quantized with QV-LSQ to W6A7, with 8-bit input and output layers.
 
-The build uses FINN's phase API. It replaces the preparation and optimization
-phases with SigLIP-specific variants, then uses the standard FINN hardware
-phases:
+The FPGA graph ends at `image_embeds`. ImageNet class comparison remains on the
+host and the text tower is not part of the generated accelerator.
 
-1. `phase_prepare_siglip`
-2. `phase_optimize_siglip`
-3. `phase_convert_to_hardware`
-4. `phase_optimize_hardware`
-5. `phase_build_hardware` for RTL/OOC builds
-6. `phase_generate_outputs` for RTL/OOC builds
+## Inputs
 
-The SigLIP optimization phase extracts LayerNorm scale/bias and exposes
-quantized attention projections to FINN's existing hardware conversions. A
-model-specific step before loop rolling then locates the repeated vision
-blocks, rejects topology mismatches, and writes `siglip_mlo_ranges.json` into
-the build directory.
+The quantized model is not distributed with FINN. Put these files somewhere
+visible inside the FINN container, for example under `build/siglip/`:
 
-## Input contract
+- `qat_static_imagenet_qonnx.onnx`: canonical, shape-inferred QONNX model;
+- `qat_report.json`: matching quantization and ImageNet evaluation report.
 
-The default profile expects:
+The report is checked against the model identity, precision, transformer depth,
+image size, and patch size before the build starts.
 
-- model: `google/siglip2-base-patch16-224`
-- static image input: `[1, 3, 224, 224]`
-- 12 vision-transformer blocks
-- QV-LSQ quantization: W6A7, with 8-bit edge layers
-- QONNX `Quant` nodes and inferred static tensor shapes
-- an `image_embeds` graph output (the optional `class_scores` branch is removed)
+## Run
 
-Use the canonical, shape-inferred QONNX output from the quantization flow. Pass
-its `qat_report.json` with `--quantization-report` to check model identity,
-precision, depth, image size, and quantizer provenance before FINN starts.
+Run the commands from the FINN repository root.
 
-Validate that handoff without starting a build:
+First validate the input and generate deterministic reference vectors:
 
 ```bash
 ./run-docker.sh python -m transformer_examples.siglip.build \
@@ -46,23 +30,13 @@ Validate that handoff without starting a build:
   --quantization-report build/siglip/qat_report.json \
   --output-dir build/siglip/validation \
   --validate-only
-```
 
-## Quick start
-
-Run commands from the FINN repository root. Place the QONNX model and report in
-a path visible inside the FINN container, such as the checkout or
-`$FINN_HOST_BUILD_DIR`.
-
-Generate deterministic reference vectors:
-
-```bash
 ./run-docker.sh python -m transformer_examples.siglip.make_test_vectors \
   --model build/siglip/qat_static_imagenet_qonnx.onnx \
   --output-dir build/siglip/vectors
 ```
 
-Run the phase-based estimate flow with Python checks:
+Run the estimate flow and Python checks:
 
 ```bash
 ./run-docker.sh python -m transformer_examples.siglip.build \
@@ -75,7 +49,7 @@ Run the phase-based estimate flow with Python checks:
   --expected-output-npy build/siglip/vectors/expected_output.npy
 ```
 
-Generate stitched IP and run functional RTL simulation:
+Run stitched-IP RTL verification:
 
 ```bash
 ./run-docker.sh python -m transformer_examples.siglip.build \
@@ -88,8 +62,11 @@ Generate stitched IP and run functional RTL simulation:
   --expected-output-npy build/siglip/vectors/expected_output.npy
 ```
 
-Generate a routed out-of-context VCK190 checkpoint and record ideal-memory RTL
-performance:
+This full-model simulation takes several days under XSIM. A successful run
+writes `verification_output/verify_stitched_ip_rtlsim_0_SUCCESS.npy`.
+
+Generate the routed out-of-context VCK190 DCP separately so that a long RTL
+simulation does not prevent implementation:
 
 ```bash
 ./run-docker.sh python -m transformer_examples.siglip.build \
@@ -97,75 +74,38 @@ performance:
   --quantization-report build/siglip/qat_report.json \
   --output-dir build/siglip/ooc \
   --mode ooc_synth \
-  --verify rtlsim \
-  --measure-rtlsim-performance \
-  --input-npy build/siglip/vectors/input.npy \
-  --expected-output-npy build/siglip/vectors/expected_output.npy
+  --verify none
 ```
 
-Vivado 2024.2 or newer is required for MLO. OOC synthesis can take several
-hours; run it in a persistent session. The RTL performance mode uses an ideal
-AXI-MM memory model and is an upper bound, not a board measurement.
+The main outputs are:
 
-## Configuration
+- `stitched_ip/finn_design_routed.dcp`;
+- `stitched_ip/ooc_timing.rpt`;
+- `stitched_ip/ooc_utilization.rpt`;
+- `report/ooc_synth_and_timing.json`.
 
-The `configs` directory contains:
-
-- `siglip2_base_patch16_224_w6a7_qv_lsq.json`: model, quantization, build, and
-  evidence contract;
-- `siglip2_base_patch16_224_w6a7_vck190_specialization.json`: RTL preferences
-  with the three verified HLS MVAU exceptions;
-- `siglip2_base_patch16_224_w6a7_vck190_folding.json`: initial folding and
-  memory settings for the matching QV-LSQ graph.
-
-The folding file is node-name-specific. If a new exporter changes graph names,
-start from the generated `auto_folding_config.json`, review the differences,
-and create a new profile instead of silently applying this one to another
-graph. The build applies matching settings before shuffle decomposition, then
-requires every profile entry to match the decomposed graph before continuing.
-
-The reviewed VCK190 schedule uses one local matrix buffer for untiled
-external-weight MVAUs and `TH=4` tiled AXI-MM streaming for the six loop-body
-weight matrices. This keeps the full image tower within device memory at the
-cost of serializing some weight loads and rereading tiled weights. Any future
-RTL throughput result must therefore use this exact folding and ideal-memory
-contract.
-FIFO depths are capped at 32 after automatic sizing to keep the stitched design
-within VCK190 memory capacity; this can reduce throughput, so a future
-measurement must use this capped schedule. The large top-level residual
-parameter buffer uses block RAM rather than Vivado's automatic URAM mapping.
-The two top-level attention matrix multiplications use the same legal
-`PE`/`SIMD` foldings as their loop-body counterparts. The attention dynamic
-weight loaders use flat RAM words so Vivado infers distributed memory instead
-of expanding the buffers into a congested register implementation.
-
-The default cross-stage verification tolerance is `0.27`. Phase-specific
-maximum differences are intentionally not published in this initial example;
-use the generated verification artifacts as the authoritative result for a
-particular model and build. The tolerance is only a conversion smoke-check
-bound; it is not an accuracy measurement.
+Vivado 2024.2 or newer is required. The checked-in folding file is tied to the
+node names in the matching QONNX export; use a newly reviewed folding profile
+if the exporter changes those names.
 
 ## Reference results
 
-These values describe the exact W6A7 QV-LSQ profile above. They are reference
-evidence, not values inferred by the scripts and not promises for a modified
-model.
+These results use the supplied W6A7 profile and the complete 50,000-image
+ImageNet-1K validation set.
 
-| Measurement | Result | Scope |
-| --- | ---: | --- |
-| ImageNet-1K top-1 | 72.472% | 50,000 images, static zero-shot comparison head |
-| ImageNet-1K top-5 | 92.228% | same evaluation |
-| FINN modeled latency | not measured | no current-profile scheduler result is claimed |
-| VCK190 OOC timing | 169.348 MHz Fmax; -1.906 ns WNS | routed at a 3.999 ns requested period with Vivado 2024.2; timing is not met |
-| VCK190 OOC resources | 617,246 LUT; 291,860 FF; 911 DSP; 928 RAMB36 + 66 RAMB18; 458 URAM | routed utilization report; the design fits the device |
-| Board-runtime throughput | not measured | no board run is claimed |
-| Ideal-memory RTL throughput | not measured | enable `--measure-rtlsim-performance` to produce it |
+| Measurement | Result |
+| --- | ---: |
+| ImageNet-1K top-1 | 72.472% |
+| ImageNet-1K top-5 | 92.228% |
+| Node-by-node RTL maximum absolute error | 0.251519844 (`atol=0.27`) |
+| VCK190 OOC clock target | 250.06 MHz (3.999 ns) |
+| VCK190 OOC timing | Passed; WNS 0.037 ns, hold slack 0.010 ns |
+| VCK190 OOC resources | 163,595 LUT; 285,187 FF; 911 DSP; 796 RAMB36; 89 RAMB18; 459 URAM |
 
-The routed design fits the VCK190, but it misses the requested 3.999 ns clock
-period. The Fmax and WNS above are the values generated by FINN from the
-routed Vivado report; they must not be interpreted as meeting the 250 MHz
-target.
+The node-by-node RTL check and a two-frame FINNLoop-body RTL test completed.
+The complete stitched-IP RTL simulation has not yet been run to completion, so
+no full-model stitched-RTL correctness or throughput result is claimed.
 
-For a new run, use the generated accuracy report, `report` directory,
-`rtlsim_performance.json`, and OOC timing/route reports as the authoritative
-measurements. Do not derive throughput from the target FPS setting.
+The timing result is for the routed out-of-context accelerator IP. It proves
+that the generated IP meets its 250 MHz constraint and produces a routed DCP;
+it is not a complete VCK190 platform bitstream or board-runtime measurement.

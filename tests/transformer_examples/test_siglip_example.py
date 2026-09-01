@@ -76,16 +76,16 @@ def test_default_profile_records_verified_w6a7_contract():
     assert ooc["part"] == "xcvc1902-vsva2197-2MP-e-S"
     assert ooc["vivado_version"] == "2024.2"
     assert ooc["clock_period_ns"] == 3.999
-    assert ooc["wns_ns"] == -1.906
-    assert ooc["fmax_mhz"] == 169.3480101608806
+    assert ooc["wns_ns"] == 0.037
+    assert ooc["fmax_mhz"] == 252.39777889954567
     assert ooc["resources"] == {
-        "LUT": 617246,
-        "FF": 291860,
+        "LUT": 163595,
+        "FF": 285187,
         "DSP": 911,
-        "BRAM_36K": 928,
-        "BRAM_18K": 66,
-        "URAM": 458,
-        "SRL": 30492,
+        "BRAM_36K": 796,
+        "BRAM_18K": 89,
+        "URAM": 459,
+        "SRL": 31019,
     }
     assert profile.reference_metrics["board_runtime_throughput_fps"] is None
     assert profile.reference_metrics["ideal_memory_rtlsim_throughput_fps"] is None
