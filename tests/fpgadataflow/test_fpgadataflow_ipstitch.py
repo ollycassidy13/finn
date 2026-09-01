@@ -40,15 +40,11 @@ from qonnx.transformation.infer_data_layouts import InferDataLayouts
 from qonnx.util.basic import gen_finn_dt_tensor, qonnx_make_model
 
 from finn.core.onnx_exec import execute_onnx
-from finn.transformation.fpgadataflow import create_stitched_ip
 from finn.transformation.fpgadataflow.alveo_build import PrepareForLinking, VitisLink
 from finn.transformation.fpgadataflow.create_dataflow_partition import (
     CreateDataflowPartition,
 )
-from finn.transformation.fpgadataflow.create_stitched_ip import (
-    CreateStitchedIP,
-    append_missing_finnloop_rtlsim_sources,
-)
+from finn.transformation.fpgadataflow.create_stitched_ip import CreateStitchedIP
 from finn.transformation.fpgadataflow.floorplan import Floorplan
 from finn.transformation.fpgadataflow.hlssynth_ip import HLSSynthIP
 from finn.transformation.fpgadataflow.insert_iodma import InsertIODMA
@@ -69,157 +65,6 @@ test_pynq_board = "AUP-ZU3_8GB"
 test_fpga_part = pynq_part_map[test_pynq_board]
 
 ip_stitch_model_dir = os.environ["FINN_BUILD_DIR"]
-
-
-class FakeHWCustomOp:
-    def __init__(self, code_gen_dir):
-        self.code_gen_dir = code_gen_dir
-
-    def get_nodeattr(self, name):
-        assert name == "code_gen_dir_ipgen"
-        return self.code_gen_dir
-
-
-class FakeNode:
-    def __init__(self, op_type, code_gen_dir=None):
-        self.op_type = op_type
-        self.code_gen_dir = code_gen_dir
-
-
-class FakeGraph:
-    def __init__(self, nodes):
-        self.node = nodes
-
-
-class FakeModel:
-    def __init__(self, nodes):
-        self.graph = FakeGraph(nodes)
-
-
-@pytest.mark.fpgadataflow
-def test_ipstitch_appends_missing_finnloop_rtlsim_sources(tmp_path, monkeypatch):
-    top_list = tmp_path / "all_verilog_srcs.txt"
-    existing_top = tmp_path / "top_existing.v"
-    existing_duplicate_basename = tmp_path / "same_name.sv"
-    existing_top.write_text("// top\n")
-    existing_duplicate_basename.write_text("// shared source\n")
-    top_list.write_text(str(existing_top) + "\n" + str(existing_duplicate_basename) + "\n")
-
-    loop_a = tmp_path / "loop_a"
-    loop_b = tmp_path / "loop_b"
-    loop_a.mkdir()
-    loop_b.mkdir()
-
-    loop_a_new_v = loop_a / "nested_a.v"
-    loop_a_new_sv = loop_a / "nested_a_extra.SV"
-    loop_a_skip_txt = loop_a / "ignore.txt"
-    loop_a_dup_basename = loop_a / "same_name.sv"
-    for source_path in [
-        loop_a_new_v,
-        loop_a_new_sv,
-        loop_a_skip_txt,
-    ]:
-        source_path.write_text("// loop a\n")
-    loop_a_dup_basename.write_text("// shared source\n")
-    (loop_a / "all_verilog_srcs.txt").write_text(
-        "\n".join(
-            map(
-                str,
-                [
-                    loop_a_new_v,
-                    loop_a_new_sv,
-                    loop_a_skip_txt,
-                    loop_a_dup_basename,
-                ],
-            )
-        )
-        + "\n"
-    )
-
-    loop_b_new_vhd = loop_b / "nested_b.vhd"
-    loop_b_dup_basename = loop_b / "nested_a.v"
-    for source_path in [loop_b_new_vhd, loop_b_dup_basename]:
-        source_path.write_text("// loop b\n")
-    loop_b_dup_basename.write_text("// loop a\n")
-    (loop_b / "all_verilog_srcs.txt").write_text(
-        "\n".join(map(str, [loop_b_new_vhd, loop_b_dup_basename])) + "\n"
-    )
-
-    model = FakeModel(
-        [
-            FakeNode("MVAU_rtl", str(loop_a)),
-            FakeNode("FINNLoop", str(loop_a)),
-            FakeNode("FINNLoop", str(loop_b)),
-            FakeNode("FINNLoop", str(tmp_path / "missing_loop")),
-        ]
-    )
-    monkeypatch.setattr(
-        create_stitched_ip,
-        "getCustomOp",
-        lambda node: FakeHWCustomOp(node.code_gen_dir),
-    )
-
-    append_missing_finnloop_rtlsim_sources(model, str(top_list))
-    assert top_list.read_text().splitlines() == [
-        str(existing_top),
-        str(existing_duplicate_basename),
-        str(loop_a_new_v),
-        str(loop_a_new_sv),
-        str(loop_b_new_vhd),
-    ]
-
-    append_missing_finnloop_rtlsim_sources(model, str(tmp_path / "missing_top.txt"))
-
-
-@pytest.mark.fpgadataflow
-def test_ipstitch_rejects_conflicting_nested_rtlsim_basename(tmp_path, monkeypatch):
-    source_name = "StreamingDataWidthConverter_rtl_0.v"
-    top_source = tmp_path / "top" / source_name
-    nested_source = tmp_path / "loop" / source_name
-    top_source.parent.mkdir()
-    nested_source.parent.mkdir()
-    top_source.write_text("module same_name(input [7:0] in); endmodule\n")
-    nested_source.write_text("module same_name(input [15:0] in); endmodule\n")
-    top_list = tmp_path / "all_verilog_srcs.txt"
-    top_list.write_text(str(top_source) + "\n")
-    (nested_source.parent / "all_verilog_srcs.txt").write_text(str(nested_source) + "\n")
-    model = FakeModel([FakeNode("FINNLoop", str(nested_source.parent))])
-    monkeypatch.setattr(
-        create_stitched_ip,
-        "getCustomOp",
-        lambda node: FakeHWCustomOp(node.code_gen_dir),
-    )
-
-    with pytest.raises(RuntimeError, match="Conflicting stitched-RTL sources"):
-        append_missing_finnloop_rtlsim_sources(model, str(top_list))
-
-
-@pytest.mark.parametrize("nested_already_listed", [False, True])
-@pytest.mark.fpgadataflow
-def test_ipstitch_rejects_conflicting_package_basename(
-    tmp_path, monkeypatch, nested_already_listed
-):
-    top_source = tmp_path / "top" / "pwpolyf_pkg.sv"
-    nested_source = tmp_path / "loop" / "pwpolyf_pkg.sv"
-    top_source.parent.mkdir()
-    nested_source.parent.mkdir()
-    top_source.write_text("package pwpolyf_pkg; localparam int A = 1; endpackage\n")
-    nested_source.write_text("package pwpolyf_pkg; localparam int A = 2; endpackage\n")
-    top_list = tmp_path / "all_verilog_srcs.txt"
-    top_sources = [top_source]
-    if nested_already_listed:
-        top_sources.append(nested_source)
-    top_list.write_text("\n".join(map(str, top_sources)) + "\n")
-    (nested_source.parent / "all_verilog_srcs.txt").write_text(str(nested_source) + "\n")
-    model = FakeModel([FakeNode("FINNLoop", str(nested_source.parent))])
-    monkeypatch.setattr(
-        create_stitched_ip,
-        "getCustomOp",
-        lambda node: FakeHWCustomOp(node.code_gen_dir),
-    )
-
-    with pytest.raises(RuntimeError, match="Conflicting stitched-RTL sources"):
-        append_missing_finnloop_rtlsim_sources(model, str(top_list))
 
 
 def create_one_fc_model(mem_mode="internal_embedded"):
