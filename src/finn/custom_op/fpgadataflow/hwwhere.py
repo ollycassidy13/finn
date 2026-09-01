@@ -9,12 +9,8 @@ from qonnx.core.datatype import DataType
 from finn.custom_op.fpgadataflow.hwcustomop import HWCustomOp
 
 
-class Where(HWCustomOp):
+class HWWhere(HWCustomOp):
     """Elementwise ONNX Where with multidirectional broadcasting."""
-
-    # Approximate the Vivado ``ram_style = "auto"`` mapping decision. Smaller
-    # buffers are normally implemented as distributed RAM; larger ones use BRAM.
-    _AUTO_BRAM_THRESHOLD_BITS = 1024
 
     def __init__(self, onnx_node, **kwargs):
         super().__init__(onnx_node, **kwargs)
@@ -206,7 +202,14 @@ class Where(HWCustomOp):
         )
 
     def _input_gen_buffer_specs(self):
-        """Return the (width, depth) of each RTL input_gen buffer."""
+        """Return the (width, depth) of each RTL input_gen buffer.
+
+        The depth here must match the buffer size that ``input_gen.sv`` derives
+        at elaboration from its FM_SIZE/DIMS/COEFS parameters (see where.sv's
+        INIT_FM_SIZE/INIT_COEFS, which feed those parameters). Resource
+        estimation has no access to the elaborated RTL, so this recomputes the
+        same occupancy bound in Python; keep it in sync with input_gen.sv.
+        """
 
         out_shape = self._rtl_shape(self.get_normal_output_shape())
         out_pe = self._output_stream_pe()
@@ -228,14 +231,18 @@ class Where(HWCustomOp):
             fm_size = int(np.prod([word_dim(i) for i in range(len(out_shape))]))
             coefs = []
             for axis, dim in enumerate(aligned_shape):
-                if dim == 1:
+                # Replay (coef 0) only when the operand dim is 1 and the output
+                # dim is >1, matching where.sv's INIT_COEFS. When the output dim
+                # is also 1 the RTL keeps a real stride, so mirror that here.
+                if dim == 1 and out_dims[axis] > 1:
                     coefs.append(0)
                 else:
                     coefs.append(
                         int(np.prod([word_dim(i) for i in range(axis + 1, len(out_shape))]))
                     )
 
-            # Mirror input_gen.sv's elaboration-time occupancy calculation.
+            # Mirror the occupancy recurrence input_gen.sv evaluates at
+            # elaboration to size its circular replay buffer.
             weights = [fm_size] + coefs
             free_flags = [True]
             for axis, coef in enumerate(coefs):
@@ -281,21 +288,23 @@ class Where(HWCustomOp):
             return math.ceil(depth / 1024) * math.ceil(width / 18)
         return math.ceil(depth / 512) * math.ceil(width / 36)
 
-    def bram_estimation(self):
+    def bram_estimation(self, fpgapart):
         ram_style = self.get_nodeattr("ram_style")
         if ram_style == "block":
             buffer_specs = self._input_gen_buffer_specs()
         elif ram_style == "auto":
+            # Vivado maps small buffers to distributed RAM; only buffers of at
+            # least ~1 kbit are expected to end up in BRAM.
             buffer_specs = [
                 (width, depth)
                 for width, depth in self._input_gen_buffer_specs()
-                if width * depth >= self._AUTO_BRAM_THRESHOLD_BITS
+                if width * depth >= 1024
             ]
         else:
             return 0
         return int(sum(self._bram18_estimation(width, depth) for width, depth in buffer_specs))
 
-    def uram_estimation(self):
+    def uram_estimation(self, fpgapart):
         if self.get_nodeattr("ram_style") != "ultra":
             return 0
         return int(
@@ -305,37 +314,37 @@ class Where(HWCustomOp):
             )
         )
 
-    def bram_efficiency_estimation(self):
-        bram_estimate = self.bram_estimation()
+    def bram_efficiency_estimation(self, fpgapart):
+        bram_estimate = self.bram_estimation(fpgapart)
         if bram_estimate == 0:
             return 1
         buffer_specs = self._input_gen_buffer_specs()
         if self.get_nodeattr("ram_style") == "auto":
+            # Match bram_estimation's ~1 kbit distributed-vs-BRAM split.
             buffer_specs = [
-                (width, depth)
-                for width, depth in buffer_specs
-                if width * depth >= self._AUTO_BRAM_THRESHOLD_BITS
+                (width, depth) for width, depth in buffer_specs if width * depth >= 1024
             ]
         used_bits = sum(width * depth for width, depth in buffer_specs)
         return used_bits / (bram_estimate * 36 * 512)
 
-    def uram_efficiency_estimation(self):
-        uram_estimate = self.uram_estimation()
+    def uram_efficiency_estimation(self, fpgapart):
+        uram_estimate = self.uram_estimation(fpgapart)
         if uram_estimate == 0:
             return 1
         used_bits = sum(width * depth for width, depth in self._input_gen_buffer_specs())
         return used_bits / (uram_estimate * 72 * 4096)
 
-    def lut_estimation(self):
+    def lut_estimation(self, fpgapart):
         selection_luts = 64 + self.get_nodeattr("PE") * self.get_output_datatype().bitwidth()
         ram_style = self.get_nodeattr("ram_style")
         if ram_style == "distributed":
             buffer_specs = self._input_gen_buffer_specs()
         elif ram_style == "auto":
+            # Complement of bram_estimation: buffers below ~1 kbit stay in LUTRAM.
             buffer_specs = [
                 (width, depth)
                 for width, depth in self._input_gen_buffer_specs()
-                if width * depth < self._AUTO_BRAM_THRESHOLD_BITS
+                if width * depth < 1024
             ]
         else:
             buffer_specs = []

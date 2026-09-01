@@ -78,15 +78,6 @@ class VitisOptStrategyCfg(str, Enum):
     BUILD_SPEED = "quick"
 
 
-class LargeFIFOMemStyle(str, Enum):
-    """Type of memory resource to use for large FIFOs."""
-
-    AUTO = "auto"
-    BRAM = "block"
-    LUTRAM = "distributed"
-    URAM = "ultra"
-
-
 class VerificationStepType(str, Enum):
     "Steps at which FINN ONNX execution can be launched for verification."
 
@@ -264,22 +255,14 @@ class DataflowBuildConfig:
     #: for each FIFO.
     auto_fifo_depths: Optional[bool] = True
 
-    #: Whether FIFO nodes with depth larger than 32768 will be split.
-    #: Allow to configure very large FIFOs in the folding_config_file.
-    split_large_fifos: Optional[bool] = False
-
     #: Optional upper bound applied to FIFO depths after sizing and before
-    #: large-FIFO splitting. This trades buffering and potentially throughput
-    #: for memory use; the resulting design must be checked for liveness.
+    #: FIFO insertion. This trades buffering and potentially throughput for
+    #: memory use; the resulting design must be checked for liveness.
     fifo_depth_cap: Optional[int] = None
 
     #: When `auto_fifo_depths = True`, select which method will be used for
     #: setting the FIFO sizes.
     auto_fifo_strategy: Optional[AutoFIFOSizingMethod] = AutoFIFOSizingMethod.LARGEFIFO_RTLSIM
-
-    #: Memory resource type for large FIFOs
-    #: Only relevant when `auto_fifo_depths = True`
-    large_fifo_mem_style: Optional[LargeFIFOMemStyle] = LargeFIFOMemStyle.AUTO
 
     #: Enable input throttling for simulation-based FIFO sizing
     #: Only relevant if auto_fifo_strategy = LARGEFIFO_RTLSIM
@@ -375,14 +358,10 @@ class DataflowBuildConfig:
     #: ideal AXI-MM memory model for this measurement.
     rtlsim_batch_size: Optional[int] = 2
 
-    #: If set to True, FIFOs with impl_style=vivado will be kept during
-    #: rtlsim, otherwise they will be replaced by RTL implementations.
-    rtlsim_use_vivado_comps: Optional[bool] = True
-
     #: Use behavioral simulation for RTLSim verification steps.
     #: When True, passes -define FINN_SIMULATION to xelab, enabling faster
     #: behavioral models for DSP-heavy modules (MVU, LayerNorm, Elementwise)
-    #: and fifo_gauge (with debug capabilities) instead of Q_srl.
+    #: and fifo_gauge (with debug capabilities) instead of the synthesizable fifo.sv.
     #: Does not affect FIFO sizing which always uses behavioral simulation.
     verify_rtlsim_behavioral: Optional[bool] = False
 

@@ -185,7 +185,6 @@ def build_siglip(
         infer_shuffle_skip_first=False,
         folding_two_pass_relaxation=False,
         auto_fifo_depths=True,
-        split_large_fifos=True,
         fifo_depth_cap=int(build_config["fifo_depth_cap"]),
         save_intermediate_models=True,
         mlo=True,

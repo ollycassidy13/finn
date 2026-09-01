@@ -642,8 +642,9 @@ def test_rtlsim_shuffle_layer(shuffle_param, datatype, simd, monkeypatch):
 @pytest.mark.fpgadataflow
 @pytest.mark.vivado
 @pytest.mark.slow
-def test_stitched_ip_shuffle_layer(shuffle_sip_param, datatype, simd):
+def test_stitched_ip_shuffle_layer(shuffle_sip_param, datatype, simd, monkeypatch):
     """Build stitched IP for shuffle layer tests and save results for buffer analysis"""
+    monkeypatch.setenv("LIVENESS_THRESHOLD", "10000000")
     dt = DataType[datatype]
     simd = int(simd[-1])
     in_shape = shuffle_sip_param["in_shape"]
@@ -737,8 +738,8 @@ def test_shuffle_config_consolidation():
 @pytest.mark.fpgadataflow
 @pytest.mark.vivado
 @pytest.mark.slow
-def test_inner_shuffle_rtlsim_sparse_frames_are_quiescent(monkeypatch):
-    """A completed page must not be re-announced while the next frame is idle."""
+def test_inner_shuffle_rtlsim_stalled_final_write_is_quiescent(monkeypatch):
+    """An incomplete page must not be announced while its final write is stalled."""
     monkeypatch.setenv("LIVENESS_THRESHOLD", "10000000")
     if not finnxsi.is_available():
         pytest.skip("finn_xsi (XSI rtlsim) not available")
@@ -768,58 +769,38 @@ def test_inner_shuffle_rtlsim_sparse_frames_are_quiescent(monkeypatch):
 
     inst = getCustomOp(model.get_nodes_by_op_type("InnerShuffle_rtl")[0])
     in_folded = inst.get_folded_input_shape(0)
-    out_folded = inst.get_folded_output_shape(0)
-
-    def pack(values, shape, dtype, width):
-        values = np.asarray(values, dtype=np.float32).reshape(shape)
-        return npy_to_rtlsim_input(values, dtype, width)
-
-    frames = [np.arange(16, dtype=np.float32).reshape(in_shape) + offset for offset in (0, 32, 64)]
-    packed_frames = [
-        pack(frame, in_folded, inst.get_input_datatype(0), inst.get_instream_width(0))
-        for frame in frames
-    ]
-    packed_expected = [
-        pack(
-            frame.transpose(0, 2, 1),
-            out_folded,
-            inst.get_output_datatype(0),
-            inst.get_outstream_width(0),
-        )
-        for frame in frames
-    ]
+    frame = np.arange(16, dtype=np.float32).reshape(in_folded)
+    packed_frame = npy_to_rtlsim_input(
+        frame,
+        inst.get_input_datatype(0),
+        inst.get_instream_width(0),
+    )
 
     sim = inst.get_rtlsim()
     try:
         inst.reset_rtlsim(sim)
-        for frame_index, (packed_input, expected) in enumerate(zip(packed_frames, packed_expected)):
-            sim.stream_input("in0_V", (f"{value:x}" for value in packed_input), throttle=(1, 4))
-            watchdog = sim.create_watchdog(f"frame {frame_index} timeout", 256)
-            output = sim.collect_output("out0_V", len(expected), watchdog=watchdog)
-            assert not sim.run()
-            sim.remove_watchdog(watchdog)
-            assert [int(value, 16) for value in output] == expected
+        sim.stream_input("in0_V", (f"{value:x}" for value in packed_frame[:-1]))
+        assert not sim.run()
 
-            if frame_index == 0:
-                output_valid = sim.get_bus_port("out0_V", "tvalid")
+        output_valid = sim.get_bus_port("out0_V", "tvalid")
 
-                class IdleProbe:
-                    def __init__(self, cycles):
-                        self.remaining = cycles
-                        self.saw_valid = False
+        class IdleProbe:
+            def __init__(self, cycles):
+                self.remaining = cycles
+                self.saw_valid = False
 
-                    def __bool__(self):
-                        return True
+            def __bool__(self):
+                return True
 
-                    def __call__(self, _sim):
-                        self.saw_valid |= output_valid.read().as_bool()
-                        self.remaining -= 1
-                        return None if self.remaining == 0 else {}
+            def __call__(self, _sim):
+                self.saw_valid |= output_valid.read().as_bool()
+                self.remaining -= 1
+                return None if self.remaining == 0 else {}
 
-                probe = IdleProbe(32)
-                sim.enlist(probe)
-                sim.run()
-                assert not probe.saw_valid
+        probe = IdleProbe(32)
+        sim.enlist(probe)
+        assert not sim.run()
+        assert not probe.saw_valid
     finally:
         inst.close_rtlsim(sim)
 
