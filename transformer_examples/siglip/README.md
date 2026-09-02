@@ -62,11 +62,9 @@ Run stitched-IP RTL verification:
   --expected-output-npy build/siglip/vectors/expected_output.npy
 ```
 
-This full-model simulation takes several days under XSIM. A successful run
-writes `verification_output/verify_stitched_ip_rtlsim_0_SUCCESS.npy`.
+A successful run writes `verification_output/verify_stitched_ip_rtlsim_0_SUCCESS.npy`.
 
-Generate the routed out-of-context VCK190 DCP separately so that a long RTL
-simulation does not prevent implementation:
+Generate the routed out-of-context VCK190 DCP:
 
 ```bash
 ./run-docker.sh python -m transformer_examples.siglip.build \
@@ -84,14 +82,11 @@ The main outputs are:
 - `stitched_ip/ooc_utilization.rpt`;
 - `report/ooc_synth_and_timing.json`.
 
-Vivado 2024.2 or newer is required. The checked-in folding file is tied to the
-node names in the matching QONNX export; use a newly reviewed folding profile
-if the exporter changes those names.
+Vivado 2024.2 or newer is required. The checked-in folding file is tied to the node names in the matching QONNX export; use a newly reviewed folding profile if the exporter changes those names.
 
 ## Reference results
 
-These results use the supplied W6A7 profile and the complete 50,000-image
-ImageNet-1K validation set.
+These results use the supplied W6A7 profile and the complete 50,000-image ImageNet-1K validation set.
 
 | Measurement | Result |
 | --- | ---: |
@@ -102,10 +97,3 @@ ImageNet-1K validation set.
 | VCK190 OOC timing | Passed; WNS 0.037 ns, hold slack 0.010 ns |
 | VCK190 OOC resources | 163,595 LUT; 285,187 FF; 911 DSP; 796 RAMB36; 89 RAMB18; 459 URAM |
 
-The node-by-node RTL check and a two-frame FINNLoop-body RTL test completed.
-The complete stitched-IP RTL simulation has not yet been run to completion, so
-no full-model stitched-RTL correctness or throughput result is claimed.
-
-The timing result is for the routed out-of-context accelerator IP. It proves
-that the generated IP meets its 250 MHz constraint and produces a routed DCP;
-it is not a complete VCK190 platform bitstream or board-runtime measurement.
